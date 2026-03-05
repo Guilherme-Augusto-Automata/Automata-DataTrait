@@ -27,6 +27,8 @@ def build():
         "--hidden-import", "google.genai",
         "--hidden-import", "python_calamine",
         "--hidden-import", "openpyxl",
+        "--hidden-import", "_logo_data",
+        "--hidden-import", "ahocorasick",
         # Coletar dados do customtkinter
         "--collect-all", "customtkinter",
         "--collect-all", "tkinterdnd2",
@@ -34,14 +36,12 @@ def build():
         app_path,
     ]
 
-    # Se existir logo, incluir como dado adicional
-    for logo_name in ["logo.png", "logo.jpg", "logo.ico"]:
-        logo_path = os.path.join(base_dir, logo_name)
-        if os.path.exists(logo_path):
-            cmd.insert(-1, "--add-data")
-            cmd.insert(-1, f"{logo_path};.")
-            print(f"  Logo incluído: {logo_name}")
-            break
+    # Incluir _logo_data.py (logo embutida) como dado adicional
+    logo_data_path = os.path.join(base_dir, "_logo_data.py")
+    if os.path.exists(logo_data_path):
+        cmd.insert(-1, "--add-data")
+        cmd.insert(-1, f"{logo_data_path};.")
+        print("  Logo embutida incluída: _logo_data.py")
 
     print("\n🔨 Construindo executável...")
     print(f"  Comando: {' '.join(cmd)}\n")
@@ -49,8 +49,8 @@ def build():
 
     print("\n" + "=" * 60)
     print("✅ Executável gerado em: dist/TratamentoDados.exe")
+    print("   Logo embutida no executável — nenhum arquivo extra necessário!")
     print("=" * 60)
-    print("\nDica: Coloque o logo.png na mesma pasta do .exe")
 
 
 if __name__ == "__main__":

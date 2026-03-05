@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+dist/
+build/
+build/TratamentoDados/
+
+*.exe
+*.csv
+*.xlsx
+*.rar

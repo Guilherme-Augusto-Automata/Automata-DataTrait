@@ -16,6 +16,8 @@ import time
 import threading
 import os
 import sys
+import base64
+import io
 
 # Otimização: PyArrow para operações de string 2-5× mais rápidas
 try:
@@ -804,35 +806,48 @@ class App:
     # LOGO
     # --------------------------------------------------------
     def _build_logo(self, parent):
-        """Carrega a logo da empresa no header."""
-        logo_candidates = [
-            "LogoOficial_Branco.png",
-            "logo.png", "logo.jpg", "logo.ico",
-        ]
-        base_dir = self._get_base_dir()
+        """Carrega a logo da empresa no header (embutida ou de arquivo)."""
+        pil_img = None
 
-        for name in logo_candidates:
-            path = os.path.join(base_dir, name)
-            if os.path.exists(path):
-                try:
-                    pil_img = Image.open(path).convert("RGBA")
-                    # Calcula proporção para caber na altura do header
-                    max_h = 48
-                    ratio = max_h / pil_img.height
-                    new_w = int(pil_img.width * ratio)
-                    new_h = max_h
+        # 1) Tentar logo embutida (funciona dentro do .exe sem arquivo externo)
+        try:
+            from _logo_data import LOGO_BASE64
+            raw = base64.b64decode(LOGO_BASE64)
+            pil_img = Image.open(io.BytesIO(raw)).convert("RGBA")
+        except Exception:
+            pass
 
-                    self._logo_image = ctk.CTkImage(
-                        light_image=pil_img, dark_image=pil_img,
-                        size=(new_w, new_h)
-                    )
-                    self.logo_label = ctk.CTkLabel(
-                        parent, image=self._logo_image, text=""
-                    )
-                    self.logo_label.pack(side="left", padx=(0, 15))
-                    return
-                except Exception:
-                    pass
+        # 2) Fallback: arquivo no disco
+        if pil_img is None:
+            logo_candidates = [
+                "LogoOficial_Branco.png",
+                "logo.png", "logo.jpg", "logo.ico",
+            ]
+            base_dir = self._get_base_dir()
+            for name in logo_candidates:
+                path = os.path.join(base_dir, name)
+                if os.path.exists(path):
+                    try:
+                        pil_img = Image.open(path).convert("RGBA")
+                        break
+                    except Exception:
+                        pass
+
+        if pil_img is not None:
+            max_h = 48
+            ratio = max_h / pil_img.height
+            new_w = int(pil_img.width * ratio)
+            new_h = max_h
+
+            self._logo_image = ctk.CTkImage(
+                light_image=pil_img, dark_image=pil_img,
+                size=(new_w, new_h)
+            )
+            self.logo_label = ctk.CTkLabel(
+                parent, image=self._logo_image, text=""
+            )
+            self.logo_label.pack(side="left", padx=(0, 15))
+            return
 
         # Fallback: ícone com letra
         fallback = ctk.CTkFrame(parent, fg_color=COLORS["primary"],
