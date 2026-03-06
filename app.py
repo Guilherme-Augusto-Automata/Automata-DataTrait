@@ -49,6 +49,15 @@ COLORS = {
 # FUNÇÕES DE PROCESSAMENTO (VETORIZADAS)
 # ============================================================
 
+def ler_arquivo(path, **kwargs):
+    """Lê Excel (.xlsx/.xls) ou CSV separado por | (.csv). Aceita kwargs extras para pandas."""
+    if path.lower().endswith(".csv"):
+        return pd.read_csv(path, sep="|", encoding="utf-8-sig", dtype=kwargs.pop("dtype", None), **kwargs)
+    else:
+        engine = kwargs.pop("engine", "calamine")
+        return pd.read_excel(path, engine=engine, **kwargs)
+
+
 def col_idx(col: str) -> int:
     """Converte letra de coluna Excel (ex: 'AQ') para índice 0-based."""
     col = col.upper()
@@ -63,7 +72,7 @@ def processar_equador(input_path, output_dir, formato, log_callback, done_callba
     try:
         log_callback("📂 Carregando arquivo do Equador...")
         t0 = time.perf_counter()
-        df = pd.read_excel(input_path, engine="calamine", dtype=str)
+        df = ler_arquivo(input_path, dtype=str)
         log_callback(f"  ✓ {len(df):,} linhas × {len(df.columns)} colunas ({time.perf_counter()-t0:.1f}s)")
 
         # Garantir colunas suficientes até AZ — batch O(n) em vez de O(c×n)
@@ -99,7 +108,10 @@ def processar_argentina(input_path, output_dir, formato, api_key, ano_cotacao,
     try:
         log_callback("📂 Carregando arquivo da Argentina...")
         t0 = time.perf_counter()
-        df = pd.read_excel(input_path, sheet_name="Planilha1", engine="calamine")
+        if input_path.lower().endswith(".csv"):
+            df = ler_arquivo(input_path)
+        else:
+            df = ler_arquivo(input_path, sheet_name="Planilha1")
         log_callback(f"  ✓ {len(df):,} linhas × {len(df.columns)} colunas ({time.perf_counter()-t0:.1f}s)")
         if _STR_DTYPE == "string[pyarrow]":
             log_callback("  ⚡ PyArrow ativo — operações de string otimizadas")
@@ -404,7 +416,7 @@ def processar_banco_dados(input_path, output_dir, formato, linhas_por_arquivo,
     try:
         log_callback("📂 Carregando arquivo...")
         t0 = time.perf_counter()
-        df = pd.read_excel(input_path, engine="calamine", dtype=str)
+        df = ler_arquivo(input_path, dtype=str)
         log_callback(f"  ✓ {len(df):,} linhas × {len(df.columns)} colunas ({time.perf_counter()-t0:.1f}s)")
 
         # Mapa de colunas (original, UPPER) para busca case-insensitive
@@ -507,7 +519,7 @@ def processar_normalizacao(data_path, regras, output_dir, formato, log_callback,
 
         log_callback("📂 Carregando arquivo de dados...")
         t0 = time.perf_counter()
-        df = pd.read_excel(data_path, engine="calamine", dtype=str)
+        df = ler_arquivo(data_path, dtype=str)
         log_callback(f"  ✓ {len(df):,} linhas × {len(df.columns)} colunas ({time.perf_counter()-t0:.1f}s)")
 
         col_marca = None
@@ -875,7 +887,7 @@ class App:
 
         self.drop_label = ctk.CTkLabel(
             self.drop_zone,
-            text="Arraste o arquivo .xlsx aqui\nou clique para selecionar",
+            text="Arraste o arquivo .xlsx / .csv aqui\nou clique para selecionar",
             font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
             justify="center"
         )
@@ -1052,15 +1064,15 @@ class App:
 
     def _on_browse(self, _event=None):
         path = filedialog.askopenfilename(
-            title="Selecionar arquivo Excel",
-            filetypes=[("Excel", "*.xlsx *.xls"), ("Todos", "*.*")]
+            title="Selecionar arquivo Excel ou CSV",
+            filetypes=[("Excel/CSV", "*.xlsx *.xls *.csv"), ("Excel", "*.xlsx *.xls"), ("CSV", "*.csv"), ("Todos", "*.*")]
         )
         if path:
             self._set_file(path)
 
     def _set_file(self, path):
-        if not path.lower().endswith((".xlsx", ".xls")):
-            messagebox.showwarning("Arquivo inválido", "Selecione um arquivo .xlsx ou .xls")
+        if not path.lower().endswith((".xlsx", ".xls", ".csv")):
+            messagebox.showwarning("Arquivo inválido", "Selecione um arquivo .xlsx, .xls ou .csv")
             return
         self.input_file = path
         nome = os.path.basename(path)
@@ -1281,7 +1293,7 @@ class App:
         ctk.CTkLabel(left, text="📁  ARQUIVO DE DADOS",
                      font=ctk.CTkFont(size=14, weight="bold"),
                      text_color=COLORS["info"]).pack(anchor="w", padx=16, pady=(0, 4))
-        ctk.CTkLabel(left, text="Excel com colunas MARCA e PARTNUMBER",
+        ctk.CTkLabel(left, text="Excel ou CSV (sep. |) com colunas MARCA e PARTNUMBER",
                      font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"]
                      ).pack(anchor="w", padx=16, pady=(0, 8))
 
@@ -1497,14 +1509,14 @@ class App:
     def _on_norm_data_browse(self, _event=None):
         path = filedialog.askopenfilename(
             title="Selecionar arquivo de dados",
-            filetypes=[("Excel", "*.xlsx *.xls"), ("Todos", "*.*")]
+            filetypes=[("Excel/CSV", "*.xlsx *.xls *.csv"), ("Excel", "*.xlsx *.xls"), ("CSV", "*.csv"), ("Todos", "*.*")]
         )
         if path:
             self._set_norm_data_file(path)
 
     def _set_norm_data_file(self, path):
-        if not path.lower().endswith((".xlsx", ".xls")):
-            messagebox.showwarning("Arquivo inválido", "Selecione um arquivo .xlsx ou .xls")
+        if not path.lower().endswith((".xlsx", ".xls", ".csv")):
+            messagebox.showwarning("Arquivo inválido", "Selecione um arquivo .xlsx, .xls ou .csv")
             return
         self.norm_input_file = path
         nome = os.path.basename(path)
@@ -1525,14 +1537,14 @@ class App:
     def _on_norm_rules_browse(self, _event=None):
         path = filedialog.askopenfilename(
             title="Selecionar arquivo de regras",
-            filetypes=[("Excel", "*.xlsx *.xls"), ("Todos", "*.*")]
+            filetypes=[("Excel/CSV", "*.xlsx *.xls *.csv"), ("Excel", "*.xlsx *.xls"), ("CSV", "*.csv"), ("Todos", "*.*")]
         )
         if path:
             self._set_norm_rules_file(path)
 
     def _set_norm_rules_file(self, path):
-        if not path.lower().endswith((".xlsx", ".xls")):
-            messagebox.showwarning("Arquivo inválido", "Selecione um arquivo .xlsx ou .xls")
+        if not path.lower().endswith((".xlsx", ".xls", ".csv")):
+            messagebox.showwarning("Arquivo inválido", "Selecione um arquivo .xlsx, .xls ou .csv")
             return
         self.norm_rules_file = path
         nome = os.path.basename(path)
@@ -1654,7 +1666,7 @@ class App:
                 messagebox.showwarning("Atenção", "Selecione o arquivo de regras.")
                 return
             try:
-                df_regras = pd.read_excel(self.norm_rules_file, engine="calamine", dtype=str)
+                df_regras = ler_arquivo(self.norm_rules_file, dtype=str)
                 col_marca = None
                 col_pn = None
                 for c in df_regras.columns:
@@ -1740,7 +1752,7 @@ class App:
         ctk.CTkLabel(left, text="📁  ARQUIVO DE ENTRADA",
                      font=ctk.CTkFont(size=14, weight="bold"),
                      text_color=COLORS["info"]).pack(anchor="w", padx=16, pady=(0, 4))
-        ctk.CTkLabel(left, text="Excel já tratado (Equador ou Argentina)",
+        ctk.CTkLabel(left, text="Excel ou CSV (sep. |) já tratado (Equador ou Argentina)",
                      font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"]
                      ).pack(anchor="w", padx=16, pady=(0, 8))
 
@@ -1751,7 +1763,7 @@ class App:
         self.db_data_drop.pack_propagate(False)
 
         self.db_data_label = ctk.CTkLabel(
-            self.db_data_drop, text="Arraste o arquivo .xlsx aqui\nou clique para selecionar",
+            self.db_data_drop, text="Arraste o arquivo .xlsx / .csv aqui\nou clique para selecionar",
             font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"], justify="center"
         )
         self.db_data_label.pack(expand=True)
@@ -1915,14 +1927,14 @@ class App:
     def _on_db_data_browse(self, _event=None):
         path = filedialog.askopenfilename(
             title="Selecionar arquivo de dados",
-            filetypes=[("Excel", "*.xlsx *.xls"), ("Todos", "*.*")]
+            filetypes=[("Excel/CSV", "*.xlsx *.xls *.csv"), ("Excel", "*.xlsx *.xls"), ("CSV", "*.csv"), ("Todos", "*.*")]
         )
         if path:
             self._set_db_data_file(path)
 
     def _set_db_data_file(self, path):
-        if not path.lower().endswith((".xlsx", ".xls")):
-            messagebox.showwarning("Arquivo inválido", "Selecione um arquivo .xlsx ou .xls")
+        if not path.lower().endswith((".xlsx", ".xls", ".csv")):
+            messagebox.showwarning("Arquivo inválido", "Selecione um arquivo .xlsx, .xls ou .csv")
             return
         self.db_input_file = path
         nome = os.path.basename(path)
