@@ -16,6 +16,7 @@ from config.colors import COLORS
 from ui.tab_tratamento import TabTratamento
 from ui.tab_normalizacao import TabNormalizacao
 from ui.tab_banco_dados import TabBancoDados
+from ui.tab_consolidacao import TabConsolidacao
 
 
 class TkinterDnDCustom(TkinterDnD.DnDWrapper, ctk.CTk):
@@ -95,6 +96,7 @@ class App:
         self.tabview.add("Tratamento")
         self.tabview.add("Normalização")
         self.tabview.add("Banco de Dados")
+        self.tabview.add("Consolidação PN")
 
     # --------------------------------------------------------
     # STATUS BAR
@@ -132,6 +134,10 @@ class App:
         )
         self.tab_banco_dados = TabBancoDados(
             self.tabview.tab("Banco de Dados"), self.root,
+            self._set_status, self.progress
+        )
+        self.tab_consolidacao = TabConsolidacao(
+            self.tabview.tab("Consolidação PN"), self.root,
             self._set_status, self.progress
         )
 
