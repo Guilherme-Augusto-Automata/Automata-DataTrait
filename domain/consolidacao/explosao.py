@@ -149,6 +149,11 @@ def verifica_explosao(df: pd.DataFrame) -> pd.DataFrame:
     if EXPLODED_FLAG not in df_copy.columns:
         df_copy[EXPLODED_FLAG] = False
 
+    # Garante dtype object para permitir armazenar listas em células
+    for col in (PN, CE):
+        if col in df_copy.columns:
+            df_copy[col] = df_copy[col].astype(object)
+
     for idx, row in df_copy.iterrows():
         pn_list = _ensure_list(row.get(PN))
         ce_list_raw = _ensure_list(row.get(CE))
