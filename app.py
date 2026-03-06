@@ -358,6 +358,145 @@ def exportar_resultado(df, output_dir, base_name, formato, log_callback):
 
 
 # ============================================================
+# PREPARAÇÃO BANCO DE DADOS
+# ============================================================
+
+# Mapeamento de colunas: (coluna_destino, [nomes_possíveis_na_origem])
+_DB_COLUMN_MAP = [
+    ("NUMERO_DE_FORMULARIO",       ["identificador"]),
+    ("RAZON_SOCIAL_IMPORTADOR",    ["importador"]),
+    ("CODIGO_LUGAR_INGRESO_MERCA", ["país de origem", "pais de origem"]),
+    ("SUBPARTIDA_ARANCELARIA",     ["nandina", "ncm-sim", "ncm_sim", "ncm sim"]),
+    ("CANTIDAD_DCMS",              ["cantidad"]),
+    ("VALOR_FOB_USD",              ["usd fob", "fob dolar", "fob dólar"]),
+    ("DESCRIPCION_MERCANCIA",      ["descrição comercial", "descricao comercial",
+                                    "descripcion arancelaria", "descripción arancelaria"]),
+    ("FECHA_LEVANTE",              ["data"]),
+    ("PARTNUMBERS",                ["partnumber", "partnumbers", "part number", "part_number"]),
+    ("MARCA",                      ["marca"]),
+]
+
+# Colunas que ficam vazias
+_DB_EMPTY_COLS = ["STATUS", "AVG", "DBL_MARKET", "DBL_SEGMENT", "COUNTRY"]
+
+# Ordem final das colunas no arquivo de saída
+_DB_OUTPUT_COLUMNS = [
+    "NUMERO_DE_FORMULARIO", "RAZON_SOCIAL_IMPORTADOR", "CODIGO_LUGAR_INGRESO_MERCA",
+    "SUBPARTIDA_ARANCELARIA", "CANTIDAD_DCMS", "VALOR_FOB_USD", "DESCRIPCION_MERCANCIA",
+    "FECHA_LEVANTE", "PARTNUMBERS", "MARCA", "STATUS", "IMPORTADORES",
+    "AVG", "DBL_MARKET", "DBL_SEGMENT", "COUNTRY", "CANTIDAD", "VALOR_FOB_USD_2",
+]
+
+
+def _find_column(df_columns_upper, candidates):
+    """Encontra a primeira coluna que corresponde aos candidatos (case-insensitive)."""
+    for cand in candidates:
+        cand_upper = cand.upper().strip()
+        for orig, upper in df_columns_upper:
+            if upper == cand_upper:
+                return orig
+    return None
+
+
+def processar_banco_dados(input_path, output_dir, formato, linhas_por_arquivo,
+                          log_callback, done_callback):
+    """Prepara arquivo para o banco de dados mapeando colunas para o formato padrão."""
+    try:
+        log_callback("📂 Carregando arquivo...")
+        t0 = time.perf_counter()
+        df = pd.read_excel(input_path, engine="calamine", dtype=str)
+        log_callback(f"  ✓ {len(df):,} linhas × {len(df.columns)} colunas ({time.perf_counter()-t0:.1f}s)")
+
+        # Mapa de colunas (original, UPPER) para busca case-insensitive
+        cols_upper = [(c, c.upper().strip()) for c in df.columns]
+
+        log_callback("\n🔄 Mapeando colunas...")
+        resultado = pd.DataFrame(index=df.index)
+        mapeamentos_ok = 0
+
+        for destino, candidatos in _DB_COLUMN_MAP:
+            col_encontrada = _find_column(cols_upper, candidatos)
+            if col_encontrada is not None:
+                resultado[destino] = df[col_encontrada].values
+                log_callback(f"  ✓ '{col_encontrada}' → {destino}")
+                mapeamentos_ok += 1
+            else:
+                resultado[destino] = ""
+                nomes = ", ".join(candidatos)
+                log_callback(f"  ⚠️ {destino} — nenhuma coluna encontrada ({nomes})")
+
+        # Colunas vazias
+        for col_vazia in _DB_EMPTY_COLS:
+            resultado[col_vazia] = ""
+
+        # Colunas repetidas
+        resultado["IMPORTADORES"] = resultado["RAZON_SOCIAL_IMPORTADOR"].values
+        resultado["CANTIDAD"] = resultado["CANTIDAD_DCMS"].values
+        resultado["VALOR_FOB_USD_2"] = resultado["VALOR_FOB_USD"].values
+        log_callback("\n📋 Colunas repetidas:")
+        log_callback("  ✓ RAZON_SOCIAL_IMPORTADOR → IMPORTADORES")
+        log_callback("  ✓ CANTIDAD_DCMS → CANTIDAD")
+        log_callback("  ✓ VALOR_FOB_USD → VALOR_FOB_USD_2")
+
+        # Reordenar colunas
+        resultado = resultado[_DB_OUTPUT_COLUMNS]
+
+        log_callback(f"\n📊 Resumo: {mapeamentos_ok}/{len(_DB_COLUMN_MAP)} colunas mapeadas")
+        log_callback(f"  Total de linhas: {len(resultado):,}")
+        log_callback(f"  Total de colunas: {len(resultado.columns)}")
+
+        # Divisão em partes
+        total_linhas = len(resultado)
+        base_name = os.path.splitext(os.path.basename(input_path))[0] + "_banco"
+
+        if linhas_por_arquivo > 0 and total_linhas > linhas_por_arquivo:
+            n_partes = (total_linhas + linhas_por_arquivo - 1) // linhas_por_arquivo
+            log_callback(f"\n✂️ Dividindo em {n_partes} parte(s) de até {linhas_por_arquivo:,} linhas...")
+
+            for i in range(n_partes):
+                inicio = i * linhas_por_arquivo
+                fim = min((i + 1) * linhas_por_arquivo, total_linhas)
+                parte_df = resultado.iloc[inicio:fim]
+                parte_name = f"{base_name}_parte{i+1}"
+                log_callback(f"\n📦 Parte {i+1}/{n_partes}: linhas {inicio+1:,} a {fim:,} ({len(parte_df):,} linhas)")
+                _exportar_banco(parte_df, output_dir, parte_name, formato, log_callback)
+        else:
+            _exportar_banco(resultado, output_dir, base_name, formato, log_callback)
+
+        done_callback(True)
+    except Exception as e:
+        log_callback(f"❌ ERRO: {e}")
+        done_callback(False)
+
+
+def _exportar_banco(df, output_dir, base_name, formato, log_callback):
+    """Exporta DataFrame do banco de dados nos formatos selecionados."""
+    if formato in ("xlsx", "ambos"):
+        xlsx_path = os.path.join(output_dir, base_name + ".xlsx")
+        log_callback(f"📝 Salvando {os.path.basename(xlsx_path)}...")
+        t0 = time.perf_counter()
+        try:
+            import polars as pl
+            df_pl = pl.from_pandas(df)
+            df_pl.write_excel(xlsx_path)
+            log_callback(f"  ✓ XLSX salvo via Polars ({time.perf_counter()-t0:.1f}s)")
+        except PermissionError:
+            log_callback("  ⚠️ Arquivo aberto em outro programa! Feche e tente novamente.")
+            raise
+        except Exception:
+            t0 = time.perf_counter()
+            df.to_excel(xlsx_path, index=False, engine="openpyxl")
+            log_callback(f"  ✓ XLSX salvo via openpyxl ({time.perf_counter()-t0:.1f}s)")
+
+    if formato in ("csv", "ambos"):
+        csv_path = os.path.join(output_dir, base_name + ".csv")
+        log_callback(f"📝 Salvando {os.path.basename(csv_path)}...")
+        t0 = time.perf_counter()
+        df.to_csv(csv_path, index=False, sep="|", encoding="utf-8-sig")
+        log_callback(f"  ✓ CSV salvo ({time.perf_counter()-t0:.1f}s)")
+
+
+# ============================================================
 # NORMALIZAÇÃO
 # ============================================================
 
@@ -542,6 +681,13 @@ class App:
         self.norm_regras_manual = []
         self.norm_processando = False
 
+        # Estado Banco de Dados
+        self.db_input_file = None
+        self.db_formato = ctk.StringVar(value="ambos")
+        self.db_output_dir = ctk.StringVar(value="")
+        self.db_linhas_var = ctk.StringVar(value="50000")
+        self.db_processando = False
+
         self._build_ui()
 
     # --------------------------------------------------------
@@ -588,6 +734,7 @@ class App:
         self.tabview.pack(fill="both", expand=True)
         self.tabview.add("Tratamento")
         self.tabview.add("Normalização")
+        self.tabview.add("Banco de Dados")
 
         # --- CORPO TRATAMENTO (2 colunas) ---
         body = self.tabview.tab("Tratamento")
@@ -801,6 +948,9 @@ class App:
 
         # --- TAB NORMALIZAÇÃO ---
         self._build_normalizacao_tab()
+
+        # --- TAB BANCO DE DADOS ---
+        self._build_banco_dados_tab()
 
     # --------------------------------------------------------
     # LOGO
@@ -1561,6 +1711,303 @@ class App:
                 "Sucesso", "Dados normalizados e salvos com sucesso!"))
         else:
             self._set_status("❌ Erro na normalização", 0)
+
+    # --------------------------------------------------------
+    # BANCO DE DADOS — UI
+    # --------------------------------------------------------
+    def _build_banco_dados_tab(self):
+        tab = self.tabview.tab("Banco de Dados")
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_columnconfigure(1, weight=2)
+        tab.grid_rowconfigure(0, weight=1)
+
+        # --- PAINEL ESQUERDO (scrollable) ---
+        left = ctk.CTkScrollableFrame(tab, fg_color=COLORS["surface"], corner_radius=12,
+                                       border_width=1, border_color=COLORS["border"])
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+
+        # Título
+        ctk.CTkLabel(left, text="🗄️  PREPARAR PARA BANCO DE DADOS",
+                     font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color=COLORS["info"]).pack(anchor="w", padx=16, pady=(16, 4))
+        ctk.CTkLabel(left, text="Mapeia as colunas do arquivo tratado\npara o formato padrão do banco de dados.",
+                     font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
+                     justify="left").pack(anchor="w", padx=16, pady=(0, 8))
+
+        ctk.CTkFrame(left, fg_color=COLORS["border"], height=1).pack(fill="x", padx=16, pady=8)
+
+        # Arquivo de entrada
+        ctk.CTkLabel(left, text="📁  ARQUIVO DE ENTRADA",
+                     font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color=COLORS["info"]).pack(anchor="w", padx=16, pady=(0, 4))
+        ctk.CTkLabel(left, text="Excel já tratado (Equador ou Argentina)",
+                     font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"]
+                     ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        self.db_data_drop = ctk.CTkFrame(left, fg_color=COLORS["card"],
+                                          corner_radius=10, height=80,
+                                          border_width=2, border_color=COLORS["border"])
+        self.db_data_drop.pack(fill="x", padx=16, pady=(0, 4))
+        self.db_data_drop.pack_propagate(False)
+
+        self.db_data_label = ctk.CTkLabel(
+            self.db_data_drop, text="Arraste o arquivo .xlsx aqui\nou clique para selecionar",
+            font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"], justify="center"
+        )
+        self.db_data_label.pack(expand=True)
+
+        self.db_data_drop.drop_target_register(DND_FILES)
+        self.db_data_drop.dnd_bind("<<Drop>>", self._on_db_data_drop)
+        self.db_data_label.drop_target_register(DND_FILES)
+        self.db_data_label.dnd_bind("<<Drop>>", self._on_db_data_drop)
+        self.db_data_drop.bind("<Button-1>", self._on_db_data_browse)
+        self.db_data_label.bind("<Button-1>", self._on_db_data_browse)
+
+        self.db_data_file_label = ctk.CTkLabel(left, text="", font=ctk.CTkFont(size=11),
+                                                text_color=COLORS["success"], wraplength=250)
+        self.db_data_file_label.pack(anchor="w", padx=16)
+
+        ctk.CTkFrame(left, fg_color=COLORS["border"], height=1).pack(fill="x", padx=16, pady=12)
+
+        # Linhas por arquivo
+        ctk.CTkLabel(left, text="✂️  LINHAS POR ARQUIVO",
+                     font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color=COLORS["info"]).pack(anchor="w", padx=16, pady=(0, 4))
+        ctk.CTkLabel(left, text="Divide o resultado em partes (0 = sem divisão)",
+                     font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"]
+                     ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        linhas_row = ctk.CTkFrame(left, fg_color="transparent")
+        linhas_row.pack(fill="x", padx=16, pady=(0, 4))
+
+        self.db_linhas_entry = ctk.CTkEntry(
+            linhas_row, textvariable=self.db_linhas_var,
+            fg_color=COLORS["card"], border_color=COLORS["border"],
+            text_color=COLORS["text"], font=ctk.CTkFont(size=12), width=120,
+        )
+        self.db_linhas_entry.pack(side="left", padx=(0, 8))
+
+        ctk.CTkLabel(linhas_row, text="linhas",
+                     font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"]
+                     ).pack(side="left")
+
+        # Atalhos rápidos
+        atalhos_row = ctk.CTkFrame(left, fg_color="transparent")
+        atalhos_row.pack(fill="x", padx=16, pady=(4, 4))
+
+        for valor, label in [("10000", "10K"), ("50000", "50K"), ("100000", "100K"), ("0", "Tudo")]:
+            ctk.CTkButton(
+                atalhos_row, text=label, width=55, height=26,
+                font=ctk.CTkFont(size=11),
+                fg_color=COLORS["card"], hover_color=COLORS["card_hover"],
+                border_width=1, border_color=COLORS["border"],
+                corner_radius=6,
+                command=lambda v=valor: self.db_linhas_var.set(v)
+            ).pack(side="left", padx=2)
+
+        ctk.CTkFrame(left, fg_color=COLORS["border"], height=1).pack(fill="x", padx=16, pady=12)
+
+        # Formato de saída
+        ctk.CTkLabel(left, text="📄  FORMATO DE SAÍDA",
+                     font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color=COLORS["info"]).pack(anchor="w", padx=16, pady=(0, 8))
+
+        for val, label in [("xlsx", "XLSX (Excel)"), ("csv", "CSV (separado por |)"),
+                           ("ambos", "Ambos")]:
+            ctk.CTkRadioButton(
+                left, text=label, variable=self.db_formato,
+                value=val, font=ctk.CTkFont(size=13),
+                fg_color=COLORS["secondary"], hover_color=COLORS["primary"],
+                border_color=COLORS["border"], text_color=COLORS["text"]
+            ).pack(anchor="w", pady=3, padx=24)
+
+        ctk.CTkFrame(left, fg_color=COLORS["border"], height=1).pack(fill="x", padx=16, pady=12)
+
+        # Pasta de saída
+        ctk.CTkLabel(left, text="💾  PASTA DE SAÍDA",
+                     font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color=COLORS["info"]).pack(anchor="w", padx=16, pady=(0, 6))
+
+        db_out_row = ctk.CTkFrame(left, fg_color="transparent")
+        db_out_row.pack(fill="x", padx=16, pady=(0, 4))
+
+        self.db_out_entry = ctk.CTkEntry(
+            db_out_row, textvariable=self.db_output_dir,
+            placeholder_text="Mesma pasta do arquivo de entrada",
+            fg_color=COLORS["card"], border_color=COLORS["border"],
+            text_color=COLORS["text"], font=ctk.CTkFont(size=11),
+        )
+        self.db_out_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        ctk.CTkButton(
+            db_out_row, text="📂", width=36, height=28,
+            font=ctk.CTkFont(size=14),
+            fg_color=COLORS["card"], hover_color=COLORS["card_hover"],
+            border_width=1, border_color=COLORS["border"],
+            corner_radius=6, command=self._on_db_browse_output
+        ).pack(side="right")
+
+        # Botão processar
+        self.db_btn_processar = ctk.CTkButton(
+            left, text="▶  PREPARAR BANCO", font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color=COLORS["secondary"], hover_color=COLORS["primary"],
+            corner_radius=8, height=44, command=self._on_preparar_banco
+        )
+        self.db_btn_processar.pack(fill="x", padx=16, pady=(12, 16))
+
+        # --- PAINEL DIREITO (Log) ---
+        right = ctk.CTkFrame(tab, fg_color=COLORS["surface"], corner_radius=12,
+                              border_width=1, border_color=COLORS["border"])
+        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+
+        right_inner = ctk.CTkFrame(right, fg_color="transparent")
+        right_inner.pack(fill="both", expand=True, padx=16, pady=16)
+
+        ctk.CTkLabel(right_inner, text="📋  LOG — BANCO DE DADOS",
+                     font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color=COLORS["info"]).pack(anchor="w", pady=(0, 8))
+
+        self.db_log_text = ctk.CTkTextbox(right_inner, fg_color=COLORS["card"],
+                                           text_color=COLORS["text"],
+                                           font=ctk.CTkFont(family="Consolas", size=12),
+                                           corner_radius=8, border_width=1,
+                                           border_color=COLORS["border"],
+                                           state="disabled", wrap="word")
+        self.db_log_text.pack(fill="both", expand=True)
+
+        # Info do formato esperado
+        info_frame = ctk.CTkFrame(right_inner, fg_color=COLORS["card"], corner_radius=8,
+                                   border_width=1, border_color=COLORS["border"])
+        info_frame.pack(fill="x", pady=(8, 0))
+
+        ctk.CTkLabel(info_frame, text="📌  Mapeamento de Colunas",
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=COLORS["warning"]).pack(anchor="w", padx=12, pady=(8, 4))
+
+        mapeamento_texto = (
+            "identificador → NUMERO_DE_FORMULARIO\n"
+            "importador → RAZON_SOCIAL_IMPORTADOR + IMPORTADORES\n"
+            "País de origem → CODIGO_LUGAR_INGRESO_MERCA\n"
+            "NANDINA / NCM-SIM → SUBPARTIDA_ARANCELARIA\n"
+            "CANTIDAD → CANTIDAD_DCMS + CANTIDAD\n"
+            "USD FOB / FOB DOLAR → VALOR_FOB_USD + VALOR_FOB_USD_2\n"
+            "Descrição Comercial → DESCRIPCION_MERCANCIA\n"
+            "Data → FECHA_LEVANTE  |  Partnumber → PARTNUMBERS\n"
+            "MARCA → MARCA"
+        )
+        ctk.CTkLabel(info_frame, text=mapeamento_texto,
+                     font=ctk.CTkFont(family="Consolas", size=10),
+                     text_color=COLORS["text_dim"], justify="left"
+                     ).pack(anchor="w", padx=12, pady=(0, 8))
+
+    # --------------------------------------------------------
+    # BANCO DE DADOS — EVENTOS
+    # --------------------------------------------------------
+    def _on_db_data_drop(self, event):
+        path = event.data.strip()
+        if path.startswith("{"):
+            path = path[1:]
+        if path.endswith("}"):
+            path = path[:-1]
+        path = path.strip('"').strip("'")
+        self._set_db_data_file(path)
+
+    def _on_db_data_browse(self, _event=None):
+        path = filedialog.askopenfilename(
+            title="Selecionar arquivo de dados",
+            filetypes=[("Excel", "*.xlsx *.xls"), ("Todos", "*.*")]
+        )
+        if path:
+            self._set_db_data_file(path)
+
+    def _set_db_data_file(self, path):
+        if not path.lower().endswith((".xlsx", ".xls")):
+            messagebox.showwarning("Arquivo inválido", "Selecione um arquivo .xlsx ou .xls")
+            return
+        self.db_input_file = path
+        nome = os.path.basename(path)
+        self.db_data_file_label.configure(text=f"✓ {nome}")
+        self.db_data_label.configure(text=f"📄 {nome}")
+        self.db_data_drop.configure(border_color=COLORS["success"])
+        self._db_log(f"📄 Arquivo selecionado: {nome}")
+
+    def _on_db_browse_output(self):
+        path = filedialog.askdirectory(title="Selecionar pasta de saída")
+        if path:
+            self.db_output_dir.set(path)
+            self._db_log(f"💾 Pasta de saída: {path}")
+
+    # --------------------------------------------------------
+    # BANCO DE DADOS — LOG & PROCESSAMENTO
+    # --------------------------------------------------------
+    def _db_log(self, msg):
+        def _update():
+            self.db_log_text.configure(state="normal")
+            self.db_log_text.insert("end", msg + "\n")
+            self.db_log_text.see("end")
+            self.db_log_text.configure(state="disabled")
+        self.root.after(0, _update)
+
+    def _db_clear_log(self):
+        self.db_log_text.configure(state="normal")
+        self.db_log_text.delete("1.0", "end")
+        self.db_log_text.configure(state="disabled")
+
+    def _db_set_processing(self, active):
+        self.db_processando = active
+        state = "disabled" if active else "normal"
+        self.root.after(0, lambda: self.db_btn_processar.configure(state=state))
+        if active:
+            self.root.after(0, lambda: self.progress.configure(mode="indeterminate"))
+            self.root.after(0, lambda: self.progress.start())
+        else:
+            self.root.after(0, lambda: self.progress.stop())
+            self.root.after(0, lambda: self.progress.configure(mode="determinate"))
+            self.root.after(0, lambda: self.progress.set(1.0))
+
+    def _on_preparar_banco(self):
+        if self.db_processando:
+            return
+        if not self.db_input_file or not os.path.exists(self.db_input_file):
+            messagebox.showwarning("Atenção", "Selecione o arquivo de dados primeiro.")
+            return
+
+        # Validar linhas por arquivo
+        try:
+            linhas = int(self.db_linhas_var.get().strip())
+            if linhas < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Valor inválido",
+                                   "Informe um número inteiro positivo para linhas por arquivo.\n"
+                                   "Use 0 para não dividir.")
+            return
+
+        self._db_clear_log()
+        output_dir = self.db_output_dir.get().strip() or os.path.dirname(self.db_input_file)
+        if not os.path.isdir(output_dir):
+            messagebox.showwarning("Pasta inválida",
+                                   f"A pasta de saída não existe:\n{output_dir}")
+            return
+        formato = self.db_formato.get()
+
+        self._db_set_processing(True)
+        self._set_status("Preparando para banco de dados...")
+
+        t = threading.Thread(target=processar_banco_dados, daemon=True,
+                             args=(self.db_input_file, output_dir, formato, linhas,
+                                   self._db_log, self._db_done))
+        t.start()
+
+    def _db_done(self, success):
+        self._db_set_processing(False)
+        if success:
+            self._set_status("✅ Banco de dados preparado!", 1.0)
+            self._db_log("\n✅ PREPARAÇÃO CONCLUÍDA COM SUCESSO!")
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Sucesso", "Arquivo preparado para o banco de dados com sucesso!"))
+        else:
+            self._set_status("❌ Erro na preparação", 0)
 
     # --------------------------------------------------------
     # RUN
