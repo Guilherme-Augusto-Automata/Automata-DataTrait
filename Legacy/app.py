@@ -512,8 +512,11 @@ def _exportar_banco(df, output_dir, base_name, formato, log_callback):
 # NORMALIZAÇÃO
 # ============================================================
 
-def processar_normalizacao(data_path, regras, output_dir, formato, log_callback, done_callback):
-    """Processa normalização de MARCA e PARTNUMBER usando Aho-Corasick."""
+def processar_normalizacao(data_path, regras, output_dir, formato, log_callback, done_callback,
+                          pn_conversions=None):
+    """Processa normalização de MARCA e PARTNUMBER usando Aho-Corasick.
+    pn_conversions: lista de {"de": "PN_ANTIGO", "para": "PN_NOVO"} para conversão direta de PN.
+    """
     try:
         import ahocorasick
 
@@ -531,7 +534,7 @@ def processar_normalizacao(data_path, regras, output_dir, formato, log_callback,
             elif upper in ("PARTNUMBER", "PART NUMBER", "PART_NUMBER", "PN"):
                 col_pn = col
 
-        if col_marca is None:
+        if col_marca is None and regras:
             log_callback("❌ Coluna MARCA não encontrada no arquivo de dados!")
             done_callback(False)
             return
@@ -540,99 +543,125 @@ def processar_normalizacao(data_path, regras, output_dir, formato, log_callback,
             done_callback(False)
             return
 
-        log_callback(f"  Coluna MARCA: '{col_marca}'")
+        if col_marca:
+            log_callback(f"  Coluna MARCA: '{col_marca}'")
         log_callback(f"  Coluna PARTNUMBER: '{col_pn}'")
 
         # Limpeza em 1 passo por coluna (fillna+upper+strip+NAN→'') fundidos
-        for _c in (col_marca, col_pn):
+        for _c in [c for c in (col_marca, col_pn) if c is not None]:
             s = df[_c].fillna("").astype(str).str.upper().str.strip()
             s[s == "NAN"] = ""
             df[_c] = s
 
-        log_callback(f"\n🔄 Aplicando {len(regras)} regra(s) de normalização...")
-
-        pn_rules = [(r["marca"].upper().strip(), r["partnumber"].upper().strip())
-                     for r in regras if r.get("partnumber", "").strip()]
-        marca_rules = [r["marca"].upper().strip()
-                       for r in regras if not r.get("partnumber", "").strip()]
-
         total_changes = 0
 
-        # --- PARTNUMBER: lookup via dict O(1) por linha + value_counts O(n) ---
-        if pn_rules:
-            log_callback(f"\n🔧 Aplicando {len(pn_rules)} regra(s) de PARTNUMBER...")
+        if regras:
+            log_callback(f"\n🔄 Aplicando {len(regras)} regra(s) de normalização...")
+
+            pn_rules = [(r["marca"].upper().strip(), r["partnumber"].upper().strip())
+                         for r in regras if r.get("partnumber", "").strip()]
+            marca_rules = [r["marca"].upper().strip()
+                           for r in regras if not r.get("partnumber", "").strip()]
+
+            # --- PARTNUMBER: lookup via dict O(1) por linha + value_counts O(n) ---
+            if pn_rules:
+                log_callback(f"\n🔧 Aplicando {len(pn_rules)} regra(s) de PARTNUMBER...")
+                t0 = time.perf_counter()
+                pn_map = {pn: marca for marca, pn in pn_rules}
+                nova_marca = df[col_pn].map(pn_map)
+                mask = nova_marca.notna()
+                changes = int(mask.sum())
+                if changes > 0:
+                    df.loc[mask, col_marca] = nova_marca[mask]
+                    total_changes += changes
+                log_callback(f"  ✓ {changes:,} linha(s) atualizadas via PN ({time.perf_counter()-t0:.2f}s)")
+                # Detalhe por regra — O(n) total via value_counts (não O(n×m))
+                pn_counts = df.loc[df[col_pn].isin(pn_map), col_pn].value_counts()
+                for marca_regra, pn_regra in pn_rules:
+                    c = int(pn_counts.get(pn_regra, 0))
+                    if c > 0:
+                        log_callback(f"    PN '{pn_regra}' → '{marca_regra}': {c:,}")
+                    else:
+                        log_callback(f"    ⚠ PN '{pn_regra}' não encontrado")
+
+            # --- MARCA: Aho-Corasick multi-pattern matching O(n) ---
+            if marca_rules:
+                log_callback(f"\n🏷️ Aplicando {len(marca_rules)} regra(s) de MARCA (Aho-Corasick)...")
+                t0 = time.perf_counter()
+
+                # Construir autômato Aho-Corasick
+                A = ahocorasick.Automaton()
+                for idx, marca_regra in enumerate(marca_rules):
+                    A.add_word(marca_regra, (idx, marca_regra))
+                A.make_automaton()
+
+                # Deduplica: corre Aho-Corasick só nos valores ÚNICOS → O(u) vs O(n)
+                marcas_series = df[col_marca]
+                uniq = marcas_series.unique()  # u valores únicos, u ≪ n
+                log_callback(f"  ⚡ Autômato: {len(marca_rules)} padrões × {len(uniq):,} valores únicos (de {len(df):,} linhas)")
+
+                remap = {}  # valor_original → valor_normalizado
+                changes_per_rule = {m: 0 for m in marca_rules}
+
+                for valor in uniq:
+                    if not valor:
+                        continue
+                    best_match = None
+                    best_len = 0
+                    for _, (_, matched_marca) in A.iter(valor):
+                        if valor == matched_marca:
+                            best_match = None
+                            break
+                        if len(matched_marca) > best_len:
+                            best_match = matched_marca
+                            best_len = len(matched_marca)
+                    if best_match is not None:
+                        remap[valor] = best_match
+
+                # Aplica remap vetorizado — O(n) via .map()
+                if remap:
+                    mapped = marcas_series.map(remap)
+                    mask = mapped.notna()
+                    df.loc[mask, col_marca] = mapped[mask]
+                    # Contagem por regra — O(n) via value_counts
+                    vc = mapped.dropna().value_counts()
+                    for regra_val, cnt in vc.items():
+                        changes_per_rule[regra_val] = int(cnt)
+                        total_changes += int(cnt)
+
+                elapsed = time.perf_counter() - t0
+                log_callback(f"  ✓ Matching concluído ({elapsed:.2f}s)")
+
+                for marca_regra in marca_rules:
+                    c = changes_per_rule[marca_regra]
+                    if c > 0:
+                        log_callback(f"    '{marca_regra}': {c:,} linha(s) normalizada(s)")
+                    else:
+                        log_callback(f"    ⚠ '{marca_regra}': nenhum match (ou já normalizada)")
+
+        # --- CONVERSÃO DE PARTNUMBER (PN → PN) ---
+        if pn_conversions:
+            log_callback(f"\n🔄 Aplicando {len(pn_conversions)} conversão(ões) de PARTNUMBER...")
             t0 = time.perf_counter()
-            pn_map = {pn: marca for marca, pn in pn_rules}
-            nova_marca = df[col_pn].map(pn_map)
-            mask = nova_marca.notna()
-            changes = int(mask.sum())
-            if changes > 0:
-                df.loc[mask, col_marca] = nova_marca[mask]
-                total_changes += changes
-            log_callback(f"  ✓ {changes:,} linha(s) atualizadas via PN ({time.perf_counter()-t0:.2f}s)")
-            # Detalhe por regra — O(n) total via value_counts (não O(n×m))
-            pn_counts = df.loc[df[col_pn].isin(pn_map), col_pn].value_counts()
-            for marca_regra, pn_regra in pn_rules:
-                c = int(pn_counts.get(pn_regra, 0))
-                if c > 0:
-                    log_callback(f"    PN '{pn_regra}' → '{marca_regra}': {c:,}")
+            conv_map = {c["de"]: c["para"] for c in pn_conversions}
+            novo_pn = df[col_pn].map(conv_map)
+            mask_conv = novo_pn.notna()
+            conv_changes = int(mask_conv.sum())
+            if conv_changes > 0:
+                df.loc[mask_conv, col_pn] = novo_pn[mask_conv]
+                total_changes += conv_changes
+            log_callback(f"  ✓ {conv_changes:,} partnumber(s) convertido(s) ({time.perf_counter()-t0:.2f}s)")
+            # Detalhe por conversão
+            conv_counts = novo_pn.dropna().value_counts()
+            for conv in pn_conversions:
+                c = int((df[col_pn] == conv["para"]).sum()) if conv["para"] else 0
+                found = conv["de"] in df[col_pn].values or conv_changes > 0
+                # Usa contagem do map original
+                mapped_count = int((novo_pn == conv["para"]).sum()) if conv["para"] else 0
+                if mapped_count > 0:
+                    log_callback(f"    '{conv['de']}' → '{conv['para']}': {mapped_count:,}")
                 else:
-                    log_callback(f"    ⚠ PN '{pn_regra}' não encontrado")
-
-        # --- MARCA: Aho-Corasick multi-pattern matching O(n) ---
-        if marca_rules:
-            log_callback(f"\n🏷️ Aplicando {len(marca_rules)} regra(s) de MARCA (Aho-Corasick)...")
-            t0 = time.perf_counter()
-
-            # Construir autômato Aho-Corasick
-            A = ahocorasick.Automaton()
-            for idx, marca_regra in enumerate(marca_rules):
-                A.add_word(marca_regra, (idx, marca_regra))
-            A.make_automaton()
-
-            # Deduplica: corre Aho-Corasick só nos valores ÚNICOS → O(u) vs O(n)
-            marcas_series = df[col_marca]
-            uniq = marcas_series.unique()  # u valores únicos, u ≪ n
-            log_callback(f"  ⚡ Autômato: {len(marca_rules)} padrões × {len(uniq):,} valores únicos (de {len(df):,} linhas)")
-
-            remap = {}  # valor_original → valor_normalizado
-            changes_per_rule = {m: 0 for m in marca_rules}
-
-            for valor in uniq:
-                if not valor:
-                    continue
-                best_match = None
-                best_len = 0
-                for _, (_, matched_marca) in A.iter(valor):
-                    if valor == matched_marca:
-                        best_match = None
-                        break
-                    if len(matched_marca) > best_len:
-                        best_match = matched_marca
-                        best_len = len(matched_marca)
-                if best_match is not None:
-                    remap[valor] = best_match
-
-            # Aplica remap vetorizado — O(n) via .map()
-            if remap:
-                mapped = marcas_series.map(remap)
-                mask = mapped.notna()
-                df.loc[mask, col_marca] = mapped[mask]
-                # Contagem por regra — O(n) via value_counts
-                vc = mapped.dropna().value_counts()
-                for regra_val, cnt in vc.items():
-                    changes_per_rule[regra_val] = int(cnt)
-                    total_changes += int(cnt)
-
-            elapsed = time.perf_counter() - t0
-            log_callback(f"  ✓ Matching concluído ({elapsed:.2f}s)")
-
-            for marca_regra in marca_rules:
-                c = changes_per_rule[marca_regra]
-                if c > 0:
-                    log_callback(f"    '{marca_regra}': {c:,} linha(s) normalizada(s)")
-                else:
-                    log_callback(f"    ⚠ '{marca_regra}': nenhum match (ou já normalizada)")
+                    log_callback(f"    ⚠ PN '{conv['de']}' não encontrado no arquivo")
 
         log_callback(f"\n📊 Total de alterações: {total_changes:,}")
 
@@ -692,6 +721,8 @@ class App:
         self.norm_output_dir = ctk.StringVar(value="")
         self.norm_regras_manual = []
         self.norm_processando = False
+        self.norm_pn_conv_enabled = ctk.BooleanVar(value=False)
+        self.norm_pn_conversions = []
 
         # Estado Banco de Dados
         self.db_input_file = None
@@ -1408,6 +1439,64 @@ class App:
 
         ctk.CTkFrame(left, fg_color=COLORS["border"], height=1).pack(fill="x", padx=16, pady=12)
 
+        # --- CONVERSÃO DE PARTNUMBER ---
+        self.norm_pn_conv_check = ctk.CTkCheckBox(
+            left, text="🔄  CONVERSÃO DE PARTNUMBER",
+            variable=self.norm_pn_conv_enabled,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color=COLORS["secondary"], hover_color=COLORS["primary"],
+            border_color=COLORS["border"], text_color=COLORS["info"],
+            command=self._on_pn_conv_toggle
+        )
+        self.norm_pn_conv_check.pack(anchor="w", padx=16, pady=(0, 4))
+
+        ctk.CTkLabel(left, text="Converte um partnumber específico em outro",
+                     font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"]
+                     ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        self.norm_pn_conv_frame = ctk.CTkFrame(left, fg_color="transparent")
+        # Inicialmente oculto
+
+        ctk.CTkLabel(self.norm_pn_conv_frame, text="PN ORIGINAL:",
+                     font=ctk.CTkFont(size=12), text_color=COLORS["text"]
+                     ).pack(anchor="w", padx=16, pady=(0, 2))
+        self.norm_pn_de_entry = ctk.CTkEntry(
+            self.norm_pn_conv_frame, placeholder_text="Ex: ABC123",
+            fg_color=COLORS["card"], border_color=COLORS["border"],
+            text_color=COLORS["text"], font=ctk.CTkFont(size=12)
+        )
+        self.norm_pn_de_entry.pack(fill="x", padx=16, pady=(0, 8))
+
+        ctk.CTkLabel(self.norm_pn_conv_frame, text="PN NOVO:",
+                     font=ctk.CTkFont(size=12), text_color=COLORS["text"]
+                     ).pack(anchor="w", padx=16, pady=(0, 2))
+        self.norm_pn_para_entry = ctk.CTkEntry(
+            self.norm_pn_conv_frame, placeholder_text="Ex: XYZ456",
+            fg_color=COLORS["card"], border_color=COLORS["border"],
+            text_color=COLORS["text"], font=ctk.CTkFont(size=12)
+        )
+        self.norm_pn_para_entry.pack(fill="x", padx=16, pady=(0, 8))
+
+        ctk.CTkButton(
+            self.norm_pn_conv_frame, text="+  Adicionar Conversão",
+            font=ctk.CTkFont(size=12), fg_color=COLORS["primary"],
+            hover_color=COLORS["secondary"], corner_radius=6, height=32,
+            command=self._add_pn_conversion
+        ).pack(fill="x", padx=16, pady=(0, 8))
+
+        self.norm_pn_conv_list_frame = ctk.CTkFrame(self.norm_pn_conv_frame, fg_color=COLORS["card"],
+                                                     corner_radius=8, border_width=1,
+                                                     border_color=COLORS["border"])
+        self.norm_pn_conv_list_frame.pack(fill="x", padx=16, pady=(0, 4))
+
+        ctk.CTkLabel(
+            self.norm_pn_conv_list_frame, text="Nenhuma conversão adicionada",
+            font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"]
+        ).pack(padx=12, pady=8)
+
+        self._norm_pn_conv_separator = ctk.CTkFrame(left, fg_color=COLORS["border"], height=1)
+        self._norm_pn_conv_separator.pack(fill="x", padx=16, pady=12)
+
         # Baixar Modelo (sempre visível)
         ctk.CTkButton(
             left, text="📥  Baixar Modelo Base",
@@ -1599,6 +1688,52 @@ class App:
                 corner_radius=4, command=lambda idx=i: self._remove_norm_rule(idx)
             ).pack(side="right", padx=4)
 
+    def _on_pn_conv_toggle(self):
+        if self.norm_pn_conv_enabled.get():
+            self.norm_pn_conv_frame.pack(fill="x", before=self._norm_pn_conv_separator)
+        else:
+            self.norm_pn_conv_frame.pack_forget()
+
+    def _add_pn_conversion(self):
+        pn_de = self.norm_pn_de_entry.get().strip()
+        pn_para = self.norm_pn_para_entry.get().strip()
+        if not pn_de:
+            messagebox.showwarning("Atenção", "Informe o PN original.")
+            return
+        if not pn_para:
+            messagebox.showwarning("Atenção", "Informe o PN novo.")
+            return
+        self.norm_pn_conversions.append({"de": pn_de.upper(), "para": pn_para.upper()})
+        self.norm_pn_de_entry.delete(0, "end")
+        self.norm_pn_para_entry.delete(0, "end")
+        self._refresh_pn_conv_list()
+
+    def _remove_pn_conversion(self, idx):
+        if 0 <= idx < len(self.norm_pn_conversions):
+            self.norm_pn_conversions.pop(idx)
+            self._refresh_pn_conv_list()
+
+    def _refresh_pn_conv_list(self):
+        for w in self.norm_pn_conv_list_frame.winfo_children():
+            w.destroy()
+        if not self.norm_pn_conversions:
+            ctk.CTkLabel(
+                self.norm_pn_conv_list_frame, text="Nenhuma conversão adicionada",
+                font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"]
+            ).pack(padx=12, pady=8)
+            return
+        for i, conv in enumerate(self.norm_pn_conversions):
+            row = ctk.CTkFrame(self.norm_pn_conv_list_frame, fg_color="transparent")
+            row.pack(fill="x", padx=8, pady=2)
+            texto = f"🔄 {conv['de']} → {conv['para']}"
+            ctk.CTkLabel(row, text=texto, font=ctk.CTkFont(size=11),
+                         text_color=COLORS["text"]).pack(side="left", padx=4)
+            ctk.CTkButton(
+                row, text="🗑", width=28, height=24, font=ctk.CTkFont(size=11),
+                fg_color=COLORS["error"], hover_color="#D32F2F",
+                corner_radius=4, command=lambda idx=i: self._remove_pn_conversion(idx)
+            ).pack(side="right", padx=4)
+
     def _download_normalizacao_template(self):
         path = filedialog.asksaveasfilename(
             title="Salvar Modelo Base",
@@ -1690,12 +1825,20 @@ class App:
                 return
         else:
             if not self.norm_regras_manual:
-                messagebox.showwarning("Atenção", "Adicione pelo menos uma regra.")
-                return
-            regras = list(self.norm_regras_manual)
+                # Sem regras manuais — ok se tiver conversões de PN
+                pass
+            else:
+                regras = list(self.norm_regras_manual)
 
-        if not regras:
-            messagebox.showwarning("Atenção", "Nenhuma regra válida encontrada.")
+        # Conversões de PN
+        pn_conversions = []
+        if self.norm_pn_conv_enabled.get() and self.norm_pn_conversions:
+            pn_conversions = list(self.norm_pn_conversions)
+
+        if not regras and not pn_conversions:
+            messagebox.showwarning("Atenção",
+                                   "Adicione pelo menos uma regra de normalização\n"
+                                   "ou uma conversão de partnumber.")
             return
 
         self._norm_clear_log()
@@ -1711,7 +1854,8 @@ class App:
 
         t = threading.Thread(target=processar_normalizacao, daemon=True,
                              args=(self.norm_input_file, regras, output_dir, formato,
-                                   self._norm_log, self._norm_done))
+                                   self._norm_log, self._norm_done),
+                             kwargs={"pn_conversions": pn_conversions})
         t.start()
 
     def _norm_done(self, success):
