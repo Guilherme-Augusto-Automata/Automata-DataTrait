@@ -1,0 +1,1 @@
+"""Domínio — lógica de negócios."""
