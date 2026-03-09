@@ -13,7 +13,7 @@ from tkinterdnd2 import DND_FILES
 
 from config.colors import COLORS
 from config.settings import DEFAULT_API_KEY, DEFAULT_ANO
-from domain.tratamento import processar_equador, processar_argentina, finalizar_argentina, processar_chile
+from domain.tratamento import processar_equador, processar_argentina, finalizar_argentina, processar_chile, processar_peru
 from domain.consolidacao import processar_analise, processar_explosao
 from ui.components import (
     parse_drop_path, validate_file_path, browse_file, browse_directory,
@@ -76,6 +76,7 @@ class TabTratamento:
         self._build_country_selector(left_scroll)
         self._build_api_key_section(left_scroll)
         self._build_chile_section(left_scroll)
+        self._build_peru_section(left_scroll)
         self._build_colombia_section(left_scroll)
         self._build_separator(left_scroll)
         self._build_format_selector(left_scroll)
@@ -106,7 +107,8 @@ class TabTratamento:
                      text_color=COLORS["info"]).pack(anchor="w", pady=(0, 8))
 
         for val, label in [("equador", "🇪🇨  Equador"), ("argentina", "🇦🇷  Argentina"),
-                           ("chile", "🇨🇱  Chile"), ("colombia", "🇨🇴  Colômbia")]:
+                           ("chile", "🇨🇱  Chile"), ("peru", "🇵🇪  Peru"),
+                           ("colombia", "🇨🇴  Colômbia")]:
             ctk.CTkRadioButton(
                 parent, text=label, variable=self.pais_selecionado,
                 value=val, font=ctk.CTkFont(size=13),
@@ -189,6 +191,29 @@ class TabTratamento:
         self.chile_file_label.pack(anchor="w")
 
         self.chile_frame.pack_forget()  # Oculto no início
+
+    def _build_peru_section(self, parent):
+        """Constrói seção específica do Peru (API Gemini para PN)."""
+        self.peru_frame = ctk.CTkFrame(parent, fg_color="transparent")
+
+        # API Key Gemini para Peru
+        ctk.CTkLabel(self.peru_frame, text="🔑  API Key Gemini",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=COLORS["info"]).pack(anchor="w", pady=(0, 4))
+
+        self.peru_api_entry = ctk.CTkEntry(
+            self.peru_frame, textvariable=self.api_key_var,
+            fg_color=COLORS["card"], border_color=COLORS["border"],
+            text_color=COLORS["text"], font=ctk.CTkFont(size=11), show="•")
+        self.peru_api_entry.pack(fill="x", pady=(0, 4))
+
+        ctk.CTkLabel(self.peru_frame,
+                     text="Necessária para detectar partnumbers via IA\n"
+                          "quando não encontrados na coluna O",
+                     font=ctk.CTkFont(size=10),
+                     text_color=COLORS["text_dim"]).pack(anchor="w", pady=(0, 8))
+
+        self.peru_frame.pack_forget()  # Oculto no início
 
     def _build_colombia_section(self, parent):
         """Constrói seção específica da Colômbia (etapa + API Claude)."""
@@ -413,6 +438,11 @@ class TabTratamento:
             self.chile_frame.pack(fill="x", pady=(12, 0), before=self._scroll_sentinel)
         else:
             self.chile_frame.pack_forget()
+        # Peru section
+        if pais == "peru":
+            self.peru_frame.pack(fill="x", pady=(12, 0), before=self._scroll_sentinel)
+        else:
+            self.peru_frame.pack_forget()
         # Colômbia section
         if pais == "colombia":
             self.colombia_frame.pack(fill="x", pady=(12, 0), before=self._scroll_sentinel)
@@ -571,6 +601,8 @@ class TabTratamento:
             self._iniciar_argentina(output_dir, formato)
         elif pais == "chile":
             self._iniciar_chile(output_dir, formato)
+        elif pais == "peru":
+            self._iniciar_peru(output_dir, formato)
         elif pais == "colombia":
             self._iniciar_colombia(output_dir)
 
@@ -597,6 +629,14 @@ class TabTratamento:
                              args=(self.input_file, self.input_file_secondary,
                                    output_dir, formato, api_key,
                                    self._log, self._done))
+        t.start()
+
+    def _iniciar_peru(self, output_dir, formato):
+        """Inicia thread de processamento do Peru."""
+        api_key = self.api_key_var.get().strip()
+        t = threading.Thread(target=processar_peru, daemon=True,
+                             args=(self.input_file, output_dir, formato,
+                                   api_key, self._log, self._done))
         t.start()
 
     def _iniciar_colombia(self, output_dir):

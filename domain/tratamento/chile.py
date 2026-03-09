@@ -384,7 +384,7 @@ def _resolver_sin_codigo_via_ia(df: pd.DataFrame, mask_sin: pd.Series,
                  f"({100 - len(unique_descs)/max(len(indices_sin),1)*100:.0f}% economia)")
 
     # ── Envio em lotes ────────────────────────────────────────
-    BATCH_SIZE = 150  # Lotes maiores = menos chamadas
+    BATCH_SIZE = 50  # Lotes menores para evitar truncamento de JSON
     total_batches = (len(unique_descs) + BATCH_SIZE - 1) // BATCH_SIZE
     client = genai.Client(api_key=api_key)
 
@@ -465,7 +465,8 @@ def _enviar_com_retries(client, prompt: str, log_callback,
     for tentativa in range(max_tentativas):
         try:
             response = client.models.generate_content(
-                model="gemini-2.0-flash", contents=prompt)
+                model="gemini-2.0-flash", contents=prompt,
+                config={"max_output_tokens": 8192})
             return response.text.strip()
         except Exception as retry_err:
             err_str = str(retry_err)
@@ -495,33 +496,97 @@ def _calcular_wait(tentativa: int, erro: Exception) -> int:
 def _parsear_resposta_partnumber(resposta_texto: str, expected_count: int,
                                   log_callback) -> list:
     """Extrai lista de partnumbers/descrições do JSON retornado pela IA.
-    Aceita chaves compactas (p/d) ou completas (partnumber/descricao)."""
+    Aceita chaves compactas (p/d) ou completas (partnumber/descricao).
+    Recupera JSON truncado (quando IA atinge limite de tokens)."""
+    # Limpar markdown
+    resposta_texto = re.sub(r"```json\s*", "", resposta_texto)
+    resposta_texto = re.sub(r"```\s*", "", resposta_texto)
+    resposta_texto = resposta_texto.strip()
+
+    resultados = None
+
+    # ── Tentativa 1: parse normal ──
     try:
-        # Limpar markdown
-        resposta_texto = re.sub(r"```json\s*", "", resposta_texto)
-        resposta_texto = re.sub(r"```\s*", "", resposta_texto)
-        resposta_texto = resposta_texto.strip()
-
         resultados = json.loads(resposta_texto)
-        if not isinstance(resultados, list):
-            log_callback(f"  ⚠️ Resposta IA não é uma lista: {type(resultados)}")
-            return []
+    except json.JSONDecodeError:
+        pass
 
-        # Normalizar chaves compactas p→partnumber, d→descricao
-        normalizados = []
-        for item in resultados:
-            if not isinstance(item, dict):
-                normalizados.append({"partnumber": "", "descricao": ""})
-                continue
-            normalizados.append({
-                "partnumber": item.get("partnumber") or item.get("p") or "",
-                "descricao": item.get("descricao") or item.get("d") or "",
-            })
-        return normalizados
-    except json.JSONDecodeError as e:
-        log_callback(f"  ⚠️ Erro ao parsear JSON da IA: {e}")
+    # ── Tentativa 2: JSON truncado — recuperar itens válidos ──
+    if resultados is None:
+        resultados = _recuperar_json_truncado(resposta_texto, log_callback)
+
+    if resultados is None or not isinstance(resultados, list):
+        log_callback(f"  ⚠️ Resposta IA inválida (não é lista)")
         log_callback(f"     Resposta: {resposta_texto[:200]}...")
         return []
+
+    # Normalizar chaves compactas p→partnumber, d→descricao
+    normalizados = []
+    for item in resultados:
+        if not isinstance(item, dict):
+            normalizados.append({"partnumber": "", "descricao": ""})
+            continue
+        normalizados.append({
+            "partnumber": item.get("partnumber") or item.get("p") or "",
+            "descricao": item.get("descricao") or item.get("d") or "",
+        })
+
+    # Se recebemos menos itens que o esperado, preencher o resto com vazio
+    if len(normalizados) < expected_count:
+        faltam = expected_count - len(normalizados)
+        log_callback(f"  ⚠️ JSON truncado: recuperados {len(normalizados)}/{expected_count} "
+                     f"itens ({faltam} perdidos)")
+        normalizados.extend([{"partnumber": "", "descricao": ""}] * faltam)
+
+    return normalizados
+
+
+def _recuperar_json_truncado(texto: str, log_callback) -> list | None:
+    """Recupera o máximo de itens de um JSON array truncado."""
+    inicio = texto.find("[")
+    if inicio == -1:
+        return None
+
+    texto = texto[inicio:]
+
+    ultimo_fecha = texto.rfind("}")
+    if ultimo_fecha == -1:
+        return None
+
+    tentativa = texto[:ultimo_fecha + 1] + "]"
+    try:
+        resultado = json.loads(tentativa)
+        if isinstance(resultado, list):
+            log_callback(f"  🔧 JSON truncado recuperado: {len(resultado)} itens salvos")
+            return resultado
+    except json.JSONDecodeError:
+        pass
+
+    penultimo_fecha = texto.rfind("}", 0, ultimo_fecha)
+    if penultimo_fecha == -1:
+        return None
+
+    tentativa2 = texto[:penultimo_fecha + 1] + "]"
+    try:
+        resultado = json.loads(tentativa2)
+        if isinstance(resultado, list):
+            log_callback(f"  🔧 JSON truncado recuperado (modo 2): {len(resultado)} itens salvos")
+            return resultado
+    except json.JSONDecodeError:
+        pass
+
+    posicoes = [i for i, c in enumerate(texto) if c == "}"]
+    for pos in reversed(posicoes[:-2]):
+        tentativa3 = texto[:pos + 1] + "]"
+        try:
+            resultado = json.loads(tentativa3)
+            if isinstance(resultado, list) and len(resultado) > 0:
+                log_callback(f"  🔧 JSON truncado recuperado (modo 3): {len(resultado)} itens salvos")
+                return resultado
+        except json.JSONDecodeError:
+            continue
+
+    return None
 
 
 # ============================================================

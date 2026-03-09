@@ -128,15 +128,15 @@ def parse_drop_path(event) -> str:
 
 def validate_file_path(path: str) -> bool:
     """Verifica se o arquivo tem extensão válida."""
-    return path.lower().endswith((".xlsx", ".xls", ".csv"))
+    return path.lower().endswith((".xlsx", ".xls", ".xlsm", ".csv"))
 
 
 def browse_file(title: str = "Selecionar arquivo Excel ou CSV") -> str | None:
     """Abre diálogo de seleção de arquivo."""
     path = filedialog.askopenfilename(
         title=title,
-        filetypes=[("Excel/CSV", "*.xlsx *.xls *.csv"),
-                   ("Excel", "*.xlsx *.xls"),
+        filetypes=[("Excel/CSV", "*.xlsx *.xls *.xlsm *.csv"),
+                   ("Excel", "*.xlsx *.xls *.xlsm"),
                    ("CSV", "*.csv"),
                    ("Todos", "*.*")]
     )
