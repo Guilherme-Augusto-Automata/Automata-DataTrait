@@ -13,7 +13,7 @@ from tkinterdnd2 import DND_FILES
 
 from config.colors import COLORS
 from config.settings import DEFAULT_API_KEY, DEFAULT_ANO
-from domain.tratamento import processar_equador, processar_argentina, finalizar_argentina
+from domain.tratamento import processar_equador, processar_argentina, finalizar_argentina, processar_chile
 from domain.consolidacao import processar_analise, processar_explosao
 from ui.components import (
     parse_drop_path, validate_file_path, browse_file, browse_directory,
@@ -38,6 +38,9 @@ class TabTratamento:
         self.ano_cotacao = ctk.StringVar(value=DEFAULT_ANO)
         self.output_dir_var = ctk.StringVar(value="")
         self.processando = False
+
+        # Estado Chile
+        self.input_file_secondary = None
 
         # Estado Colômbia
         self.etapa_colombia = ctk.StringVar(value="analise")
@@ -72,6 +75,7 @@ class TabTratamento:
 
         self._build_country_selector(left_scroll)
         self._build_api_key_section(left_scroll)
+        self._build_chile_section(left_scroll)
         self._build_colombia_section(left_scroll)
         self._build_separator(left_scroll)
         self._build_format_selector(left_scroll)
@@ -102,7 +106,7 @@ class TabTratamento:
                      text_color=COLORS["info"]).pack(anchor="w", pady=(0, 8))
 
         for val, label in [("equador", "🇪🇨  Equador"), ("argentina", "🇦🇷  Argentina"),
-                           ("colombia", "🇨🇴  Colômbia")]:
+                           ("chile", "🇨🇱  Chile"), ("colombia", "🇨🇴  Colômbia")]:
             ctk.CTkRadioButton(
                 parent, text=label, variable=self.pais_selecionado,
                 value=val, font=ctk.CTkFont(size=13),
@@ -124,6 +128,67 @@ class TabTratamento:
         self._build_year_selector(self.api_frame)
 
         self.api_frame.pack_forget()  # Oculto no início (Equador)
+
+    def _build_chile_section(self, parent):
+        """Constrói seção específica do Chile (API Gemini + arquivo secundário)."""
+        self.chile_frame = ctk.CTkFrame(parent, fg_color="transparent")
+
+        # API Key Gemini para Chile
+        ctk.CTkLabel(self.chile_frame, text="🔑  API Key Gemini",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=COLORS["info"]).pack(anchor="w", pady=(0, 4))
+
+        self.chile_api_entry = ctk.CTkEntry(
+            self.chile_frame, textvariable=self.api_key_var,
+            fg_color=COLORS["card"], border_color=COLORS["border"],
+            text_color=COLORS["text"], font=ctk.CTkFont(size=11), show="•")
+        self.chile_api_entry.pack(fill="x", pady=(0, 4))
+
+        ctk.CTkLabel(self.chile_frame,
+                     text="Necessária para resolver partnumbers SIN-CODIGO via IA",
+                     font=ctk.CTkFont(size=10),
+                     text_color=COLORS["text_dim"]).pack(anchor="w", pady=(0, 8))
+
+        # Drop zone para arquivo secundário (PROCV)
+        ctk.CTkLabel(self.chile_frame, text="📁  ARQUIVO SECUNDÁRIO (PROCV Importador)",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=COLORS["info"]).pack(anchor="w", pady=(8, 4))
+
+        ctk.CTkLabel(self.chile_frame,
+                     text="Planilha para buscar o importador (PROCV coluna A → AN → E)",
+                     font=ctk.CTkFont(size=10),
+                     text_color=COLORS["text_dim"]).pack(anchor="w", pady=(0, 6))
+
+        self.chile_drop_zone = ctk.CTkFrame(
+            self.chile_frame, fg_color=COLORS["card"],
+            corner_radius=10, height=80,
+            border_width=2, border_color=COLORS["border"])
+        self.chile_drop_zone.pack(fill="x", pady=(0, 4))
+        self.chile_drop_zone.pack_propagate(False)
+
+        self.chile_drop_label = ctk.CTkLabel(
+            self.chile_drop_zone,
+            text="Arraste o arquivo secundário .xlsx / .csv aqui\nou clique para selecionar",
+            font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
+            justify="center"
+        )
+        self.chile_drop_label.pack(expand=True)
+
+        # Registrar drag-and-drop
+        self.chile_drop_zone.drop_target_register(DND_FILES)
+        self.chile_drop_zone.dnd_bind("<<Drop>>", self._on_drop_chile_secondary)
+        self.chile_drop_label.drop_target_register(DND_FILES)
+        self.chile_drop_label.dnd_bind("<<Drop>>", self._on_drop_chile_secondary)
+        self.chile_drop_zone.bind("<Button-1>", self._on_browse_chile_secondary)
+        self.chile_drop_label.bind("<Button-1>", self._on_browse_chile_secondary)
+
+        self.chile_file_label = ctk.CTkLabel(
+            self.chile_frame, text="",
+            font=ctk.CTkFont(size=11),
+            text_color=COLORS["success"], wraplength=250)
+        self.chile_file_label.pack(anchor="w")
+
+        self.chile_frame.pack_forget()  # Oculto no início
 
     def _build_colombia_section(self, parent):
         """Constrói seção específica da Colômbia (etapa + API Claude)."""
@@ -343,6 +408,11 @@ class TabTratamento:
             self.api_frame.pack(fill="x", pady=(12, 0), before=self._scroll_sentinel)
         else:
             self.api_frame.pack_forget()
+        # Chile section
+        if pais == "chile":
+            self.chile_frame.pack(fill="x", pady=(12, 0), before=self._scroll_sentinel)
+        else:
+            self.chile_frame.pack_forget()
         # Colômbia section
         if pais == "colombia":
             self.colombia_frame.pack(fill="x", pady=(12, 0), before=self._scroll_sentinel)
@@ -379,6 +449,30 @@ class TabTratamento:
         """Trata evento de drag-and-drop."""
         path = parse_drop_path(event)
         self._set_file(path)
+
+    def _on_drop_chile_secondary(self, event):
+        """Trata drag-and-drop do arquivo secundário do Chile."""
+        path = parse_drop_path(event)
+        self._set_chile_secondary_file(path)
+
+    def _on_browse_chile_secondary(self, _event=None):
+        """Abre diálogo para selecionar arquivo secundário do Chile."""
+        path = browse_file(title="Selecionar arquivo secundário (PROCV)")
+        if path:
+            self._set_chile_secondary_file(path)
+
+    def _set_chile_secondary_file(self, path):
+        """Valida e define o arquivo secundário do Chile."""
+        if not validate_file_path(path):
+            messagebox.showwarning("Arquivo inválido",
+                                   "Selecione um arquivo .xlsx, .xls ou .csv")
+            return
+        self.input_file_secondary = path
+        nome = os.path.basename(path)
+        self.chile_file_label.configure(text=f"✓ {nome}")
+        self.chile_drop_label.configure(text=f"📄 {nome}")
+        self.chile_drop_zone.configure(border_color=COLORS["success"])
+        self._log(f"📄 Arquivo secundário (Chile): {nome}")
 
     def _on_browse_output(self):
         """Abre diálogo para selecionar pasta de saída."""
@@ -452,6 +546,9 @@ class TabTratamento:
         if pais == "argentina":
             if not self.api_key_var.get().strip():
                 return "Insira a API Key do Gemini."
+        if pais == "chile":
+            if not self.input_file_secondary or not os.path.exists(self.input_file_secondary):
+                return "Selecione o arquivo secundário (PROCV importador) para o Chile."
         if pais == "colombia" and self.etapa_colombia.get() == "analise":
             if not self.api_key_claude_var.get().strip():
                 return "Insira a API Key do Claude (Anthropic)."
@@ -472,6 +569,8 @@ class TabTratamento:
             self._iniciar_equador(output_dir, formato)
         elif pais == "argentina":
             self._iniciar_argentina(output_dir, formato)
+        elif pais == "chile":
+            self._iniciar_chile(output_dir, formato)
         elif pais == "colombia":
             self._iniciar_colombia(output_dir)
 
@@ -489,6 +588,15 @@ class TabTratamento:
         t = threading.Thread(target=processar_argentina, daemon=True,
                              args=(self.input_file, output_dir, formato, api_key,
                                    ano, self._log, self._done, self._show_cotacoes))
+        t.start()
+
+    def _iniciar_chile(self, output_dir, formato):
+        """Inicia thread de processamento do Chile."""
+        api_key = self.api_key_var.get().strip()
+        t = threading.Thread(target=processar_chile, daemon=True,
+                             args=(self.input_file, self.input_file_secondary,
+                                   output_dir, formato, api_key,
+                                   self._log, self._done))
         t.start()
 
     def _iniciar_colombia(self, output_dir):

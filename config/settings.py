@@ -1,8 +1,8 @@
 """Constantes e valores padrão."""
 import time
 
-# Chave API padrão do Gemini
-DEFAULT_API_KEY = "AIzaSyCUQl6taCkO9mDyipd7XAHFm2j3EcUsJKQ"
+# Sem chave padrão — o usuário sempre digita na interface
+DEFAULT_API_KEY = ""
 
 # Ano default para cotações (ano anterior)
 DEFAULT_ANO = str(time.localtime().tm_year - 1)
