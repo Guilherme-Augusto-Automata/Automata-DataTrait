@@ -312,6 +312,9 @@ def _extrair_descricao_marca_partnumber(df: pd.DataFrame, api_key: str,
         other=""
     )
 
+    # Limpar PNs: extrair código de prefixos descritivos e remover sufixos
+    pn_direto = pn_direto.apply(_limpar_pn)
+
     # Validar cada PN direto contra _validar_pn (rejeitar falsos positivos)
     pn_direto = pn_direto.apply(
         lambda x: x if (x == "" or _validar_pn(x)) else ""
@@ -500,6 +503,41 @@ _REGEX_CODIGO_MISTO = re.compile(
 )
 
 
+# Prefixos descritivos — texto que precede o código real
+_PREFIXOS_DESCRITIVOS = [
+    r"ANILLO\s+(?:DE\s+)?DESGASTE\s+",
+    r"O[\s\-]?RING\s+",
+    r"RUBBER[\s\-]?INLAY[:\s]+",
+    r"EMPAQUETADURA\s+",
+    r"EMPAQUE\s+",
+]
+
+
+def _limpar_pn(pn: str) -> str:
+    """Limpa PN removendo prefixos descritivos e sufixos inválidos.
+    Retorna o código limpo ou string vazia se não sobrar código válido.
+    """
+    if not pn or pn in ("", "nan", "None", "NaN"):
+        return ""
+
+    # Remover // e / no final (ex: "A91676 //" → "A91676")
+    pn = re.sub(r'\s*/+\s*$', '', pn).strip()
+
+    pn_upper = pn.upper()
+
+    # Tentar extrair código depois de prefixos descritivos
+    for prefijo in _PREFIXOS_DESCRITIVOS:
+        m = re.match(prefijo, pn_upper, re.IGNORECASE)
+        if m:
+            resto = pn[m.end():].strip()
+            # Só aceitar se o resto tiver dígitos (= código real)
+            if resto and re.search(r'\d', resto):
+                return resto
+            return ""  # Prefixo sem código → rejeitar
+
+    return pn
+
+
 def _validar_pn(pn: str) -> bool:
     """Valida se o candidato a PN é realmente um partnumber válido."""
     if not pn or len(pn) < 3:
@@ -561,8 +599,8 @@ def _validar_pn(pn: str) -> bool:
     if re.match(r"^\d+\s*(?:LITERS?|LITROS?|GALLONS?|GALONES?)$", pn_upper):
         return False
 
-    # Medidas curtas (ex: "1L", "5GL", "20 LTR", "208L")
-    if re.match(r"^\d+[.,]?\d*\s*(L|GL|LTR|ML|KG|GAL|GA|GLS|GR|OZ|CC)S?$",
+    # Medidas curtas (ex: "1L", "5GL", "20 LTR", "208L", "1LT", "5MM")
+    if re.match(r"^\d+[.,]?\d*\s*(L|LT|GL|LTR|ML|MM|KG|GAL|GA|GLS|GR|OZ|CC)S?$",
                 pn_upper):
         return False
 
@@ -582,6 +620,22 @@ def _validar_pn(pn: str) -> bool:
 
     # Rejeitar números muito curtos (menos de 4 dígitos sozinhos)
     if pn_clean.isdigit() and len(pn_clean) < 4:
+        return False
+
+    # Rejeitar strings com ":" seguido de dimensões (ex: RUBBER-INLAY: 100x100mm)
+    if ":" in pn and re.search(r'\d+\s*[xX]\s*\d+', pn):
+        return False
+
+    # Rejeitar palavra_excluida + dígitos (ex: JUNTA2, SELLO3)
+    for palavra in _PALAVRAS_EXCLUIDAS:
+        if (pn_upper.startswith(palavra)
+                and len(pn_upper) > len(palavra)
+                and pn_upper[len(palavra):].isdigit()):
+            return False
+
+    # Rejeitar códigos muito curtos e genéricos (1-3 letras + espaço + 1-2 dígitos)
+    # ex: "SF 15", "AB 3" — não são PNs reais
+    if re.match(r'^[A-Z]{1,3}\s+\d{1,2}$', pn_upper):
         return False
 
     # Rejeitar palavras comuns que passaram (verificação extra)
@@ -961,7 +1015,7 @@ def _distribuir_partnumbers(df: pd.DataFrame, desc_to_indices: dict,
         resultado = cache_resultados.get(desc_key)
         if not resultado:
             continue
-        pn_ia = (resultado.get("partnumber") or "").strip()
+        pn_ia = _limpar_pn((resultado.get("partnumber") or "").strip())
 
         if not _pn_valido_ia(pn_ia):
             continue
