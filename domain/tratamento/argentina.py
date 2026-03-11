@@ -272,8 +272,8 @@ def _calcular_fob_usd(df: pd.DataFrame, taxas_cambio: dict,
     t0 = time.perf_counter()
 
     moeda_col = df["Moeda"].astype(str).str.strip()
-    fob_moeda = pd.to_numeric(df["FOB Moeda"], errors="coerce")
-    usd_fob = pd.to_numeric(df["U$S FOB"], errors="coerce")
+    fob_moeda = pd.to_numeric(df["FOB Moeda"].astype(str).str.replace(",", "", regex=False), errors="coerce")
+    usd_fob = pd.to_numeric(df["U$S FOB"].astype(str).str.replace(",", "", regex=False), errors="coerce")
 
     fob_result = pd.Series(np.nan, index=df.index)
     _preencher_dolar_usa(fob_result, moeda_col, usd_fob, fob_moeda)

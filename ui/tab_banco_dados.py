@@ -246,12 +246,13 @@ class TabBancoDados:
         mapeamento_texto = (
             "identificador → NUMERO_DE_FORMULARIO\n"
             "importador → RAZON_SOCIAL_IMPORTADOR + IMPORTADORES\n"
-            "País de origem → CODIGO_LUGAR_INGRESO_MERCA\n"
+            "País de origem / Pais Orig. → CODIGO_LUGAR_INGRESO_MERCA\n"
             "NANDINA / NCM-SIM → SUBPARTIDA_ARANCELARIA\n"
             "CANTIDAD → CANTIDAD_DCMS + CANTIDAD\n"
-            "USD FOB / FOB DOLAR → VALOR_FOB_USD + VALOR_FOB_USD_2\n"
-            "Descrição Comercial → DESCRIPCION_MERCANCIA\n"
-            "Data → FECHA_LEVANTE  |  Partnumber → PARTNUMBERS\n"
+            "USD FOB / FOB Dolar / FOB → VALOR_FOB_USD + VALOR_FOB_USD_2\n"
+            "Descricao / Descrição Comercial → DESCRIPCION_MERCANCIA\n"
+            "Data / Fech.Num → FECHA_LEVANTE\n"
+            "Partnumber → PARTNUMBERS\n"
             "MARCA → MARCA"
         )
         ctk.CTkLabel(info_frame, text=mapeamento_texto,

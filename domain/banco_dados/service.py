@@ -4,6 +4,7 @@ Mapeia colunas do arquivo tratado para o formato padrão.
 Cada função faz uma única coisa.
 """
 
+import re
 import os
 import time
 
@@ -24,6 +25,7 @@ def processar_banco_dados(input_path: str, output_dir: str, formato: str,
     try:
         df = _carregar_arquivo(input_path, log_callback)
         resultado = _mapear_colunas(df, log_callback)
+        _padronizar_datas(resultado, log_callback)
         _adicionar_colunas_vazias(resultado, log_callback)
         _adicionar_colunas_repetidas(resultado, log_callback)
         resultado = _reordenar_colunas(resultado, log_callback)
@@ -57,12 +59,16 @@ def _carregar_arquivo(input_path: str, log_callback) -> pd.DataFrame:
 # ============================================================
 
 def _find_column(df_columns_upper: list, candidates: list) -> str | None:
-    """Encontra a primeira coluna que corresponde aos candidatos (case-insensitive)."""
+    """Encontra a coluna que corresponde aos candidatos (case-insensitive).
+    Prefere a última ocorrência (colunas tratadas, adicionadas ao final)."""
     for cand in candidates:
         cand_upper = cand.upper().strip()
+        found = None
         for orig, upper in df_columns_upper:
             if upper == cand_upper:
-                return orig
+                found = orig
+        if found is not None:
+            return found
     return None
 
 
@@ -86,6 +92,75 @@ def _mapear_colunas(df: pd.DataFrame, log_callback) -> pd.DataFrame:
 
     log_callback(f"\n📊 Resumo: {mapeamentos_ok}/{len(DB_COLUMN_MAP)} colunas mapeadas")
     return resultado
+
+
+# ============================================================
+# PADRONIZAÇÃO DE DATAS
+# ============================================================
+
+_RE_ISO_DATETIME = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})(?:\s+\d{2}:\d{2}:\d{2})?$"
+)
+_RE_SLASH_DMY = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
+_RE_DIGITS_8 = re.compile(r"^(\d{1,2})(\d{2})(\d{4})$")
+
+
+def _padronizar_datas(resultado: pd.DataFrame, log_callback) -> None:
+    """Padroniza a coluna FECHA_LEVANTE para dd/mm/yyyy."""
+    if "FECHA_LEVANTE" not in resultado.columns:
+        return
+
+    log_callback("\n📅 Padronizando datas (FECHA_LEVANTE → dd/mm/yyyy)...")
+    resultado["FECHA_LEVANTE"] = (
+        resultado["FECHA_LEVANTE"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .apply(_normalizar_data)
+    )
+
+    # Estatísticas
+    total = len(resultado)
+    validas = int(resultado["FECHA_LEVANTE"].str.match(
+        r"^\d{2}/\d{2}/\d{4}$", na=False).sum())
+    log_callback(f"  ✓ {validas:,}/{total:,} datas padronizadas")
+    if validas < total:
+        invalidas = resultado.loc[
+            ~resultado["FECHA_LEVANTE"].str.match(r"^\d{2}/\d{2}/\d{4}$", na=False),
+            "FECHA_LEVANTE"
+        ]
+        amostras = invalidas[invalidas != ""].head(5).tolist()
+        if amostras:
+            log_callback(f"  ⚠️ Amostras não reconhecidas: {amostras}")
+
+
+def _normalizar_data(valor: str) -> str:
+    """Converte um valor de data para dd/mm/yyyy."""
+    if not valor or valor in ("nan", "None", "NaN", ""):
+        return ""
+
+    # 2025-01-06 00:00:00  ou  2025-01-06
+    m = _RE_ISO_DATETIME.match(valor)
+    if m:
+        return f"{m.group(3)}/{m.group(2)}/{m.group(1)}"
+
+    # 3/12/2025  ou  03/12/2025
+    m = _RE_SLASH_DMY.match(valor)
+    if m:
+        return f"{int(m.group(1)):02d}/{int(m.group(2)):02d}/{m.group(3)}"
+
+    # 3122025  ou  27052025  (d+mm+yyyy ou dd+mm+yyyy → 7 ou 8 dígitos)
+    digits = valor.replace(" ", "")
+    m = _RE_DIGITS_8.match(digits)
+    if m:
+        return f"{int(m.group(1)):02d}/{m.group(2)}/{m.group(3)}"
+
+    # Fallback: tentar pandas
+    try:
+        dt = pd.to_datetime(valor, dayfirst=True)
+        return dt.strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        return valor
 
 
 # ============================================================
