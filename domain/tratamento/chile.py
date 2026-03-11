@@ -9,6 +9,7 @@ import os
 import re
 import json
 import time
+import threading
 
 import numpy as np
 import pandas as pd
@@ -165,8 +166,8 @@ def _calcular_fob_usd(df: pd.DataFrame, log_callback) -> None:
     if idx_em < len(df.columns) and idx_ep < len(df.columns):
         col_em_name = df.columns[idx_em]
         col_ep_name = df.columns[idx_ep]
-        em_vals = pd.to_numeric(df.iloc[:, idx_em], errors="coerce")
-        ep_vals = pd.to_numeric(df.iloc[:, idx_ep], errors="coerce")
+        em_vals = pd.to_numeric(df.iloc[:, idx_em].astype(str).str.replace(",", "", regex=False), errors="coerce")
+        ep_vals = pd.to_numeric(df.iloc[:, idx_ep].astype(str).str.replace(",", "", regex=False), errors="coerce")
         df["USD FOB"] = (em_vals * ep_vals).round(2)
         fob_ok = df["USD FOB"].notna().sum()
         log_callback(f"  ✓ {fob_ok:,} valores FOB calculados "
@@ -358,68 +359,142 @@ def _extrair_partnumber_e_descricao(df: pd.DataFrame, api_key: str,
 def _resolver_sin_codigo_via_ia(df: pd.DataFrame, mask_sin: pd.Series,
                                  descricao_concat: pd.Series,
                                  api_key: str, log_callback) -> None:
-    """Consulta Gemini AI para resolver SIN-CODIGO.
-    Otimizado: deduplica descrições idênticas antes de enviar à IA,
-    usa lotes grandes e prompt compacto para minimizar tokens.
-    """
+    """Consulta Gemini AI para resolver SIN-CODIGO."""
     from google import genai
 
     log_callback("\n🤖 Consultando Gemini AI para SIN-CODIGO...")
 
-    # ── Deduplicação ──────────────────────────────────────────
-    # Agrupa linhas com mesma descrição para enviar apenas 1x à IA
-    indices_sin = df.index[mask_sin].tolist()
-    descricoes = descricao_concat.loc[mask_sin].tolist()
+    desc_to_indices = _deduplicar_descricoes(mask_sin, descricao_concat, df, log_callback)
+    unique_descs = list(desc_to_indices.keys())
 
-    # Mapa: descrição → lista de índices no df
+    client = genai.Client(api_key=api_key)
+    cache_resultados = _enviar_lotes_com_retry(
+        unique_descs, client, _construir_prompt_partnumber, log_callback)
+
+    resolvidos_pn, resolvidos_desc = _distribuir_resultados(
+        df, desc_to_indices, cache_resultados)
+
+    log_callback(f"  ✓ IA resolveu {resolvidos_pn:,} partnumbers e "
+                 f"{resolvidos_desc:,} descrições")
+
+
+def _deduplicar_descricoes(mask: pd.Series, descricao_concat: pd.Series,
+                            df: pd.DataFrame, log_callback) -> dict[str, list[int]]:
+    """Agrupa linhas com mesma descrição para enviar apenas 1x à IA."""
+    indices = df.index[mask].tolist()
+    descricoes = descricao_concat.loc[mask].tolist()
+
     desc_to_indices: dict[str, list[int]] = {}
-    for idx_row, desc in zip(indices_sin, descricoes):
+    for idx_row, desc in zip(indices, descricoes):
         key = str(desc).strip()
         if key and key not in ("", "nan", "None"):
             desc_to_indices.setdefault(key, []).append(idx_row)
 
-    unique_descs = list(desc_to_indices.keys())
-    log_callback(f"  📊 {len(indices_sin):,} linhas SIN-CODIGO → "
-                 f"{len(unique_descs):,} descrições únicas "
-                 f"({100 - len(unique_descs)/max(len(indices_sin),1)*100:.0f}% economia)")
+    unique_count = len(desc_to_indices)
+    economia = 100 - unique_count / max(len(indices), 1) * 100
+    log_callback(f"  📊 {len(indices):,} linhas → "
+                 f"{unique_count:,} descrições únicas "
+                 f"({economia:.0f}% economia)")
+    return desc_to_indices
 
-    # ── Envio em lotes ────────────────────────────────────────
-    BATCH_SIZE = 50  # Lotes menores para evitar truncamento de JSON
-    total_batches = (len(unique_descs) + BATCH_SIZE - 1) // BATCH_SIZE
-    client = genai.Client(api_key=api_key)
 
-    resolvidos_pn = 0
-    resolvidos_desc = 0
-    cache_resultados: dict[str, dict] = {}
+def _enviar_lotes_com_retry(unique_descs: list, client, construir_prompt,
+                             log_callback,
+                             batch_size: int = 100,
+                             max_retries_truncado: int = 6,
+                             max_workers: int = 2) -> dict[str, dict]:
+    """Envia descrições em lotes ao Gemini com processamento paralelo."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    for batch_idx in range(total_batches):
-        start = batch_idx * BATCH_SIZE
-        end = min(start + BATCH_SIZE, len(unique_descs))
-        batch_descs = unique_descs[start:end]
+    total_batches = (len(unique_descs) + batch_size - 1) // batch_size
+    cache: dict[str, dict] = {}
+    log_lock = threading.Lock()
 
-        log_callback(f"  📦 Lote {batch_idx+1}/{total_batches} "
-                     f"({len(batch_descs)} descrições únicas)...")
+    def safe_log(msg):
+        with log_lock:
+            log_callback(msg)
 
-        prompt = _construir_prompt_partnumber(batch_descs)
+    batches = []
+    for i in range(total_batches):
+        start = i * batch_size
+        end = min(start + batch_size, len(unique_descs))
+        batches.append((i, unique_descs[start:end]))
+
+    abort_flag = False
+
+    for group_start in range(0, len(batches), max_workers):
+        if abort_flag:
+            break
+        group = batches[group_start:group_start + max_workers]
+
+        with ThreadPoolExecutor(max_workers=len(group)) as executor:
+            futures: dict = {}
+            for batch_idx, batch_descs in group:
+                safe_log(f"  📦 Lote {batch_idx + 1}/{total_batches} "
+                         f"({len(batch_descs)} descrições únicas)...")
+                local_cache: dict = {}
+                future = executor.submit(
+                    _processar_lote_com_retry,
+                    batch_descs, client, construir_prompt, local_cache,
+                    safe_log, max_retries_truncado)
+                futures[future] = local_cache
+                time.sleep(1)
+
+            for future in as_completed(futures):
+                cache.update(futures[future])
+                if future.result():
+                    abort_flag = True
+
+        if not abort_flag and group_start + max_workers < len(batches):
+            time.sleep(2)
+
+    return cache
+
+
+def _processar_lote_com_retry(pendentes: list, client, construir_prompt,
+                               cache: dict, log_callback,
+                               max_retries: int) -> bool:
+    """Processa um lote, re-enviando itens perdidos por truncamento.
+    Retorna True se deve abortar os lotes restantes (erro fatal)."""
+    pendentes = list(pendentes)
+    tentativa = 0
+
+    while pendentes and tentativa <= max_retries:
+        prompt = construir_prompt(pendentes)
         resposta = _enviar_com_retries(client, prompt, log_callback)
 
-        # Abortar se erro fatal (API key inválida/vazada)
         if resposta == _FATAL_ERROR:
-            log_callback(f"  ⚠️ Pulando {total_batches - batch_idx - 1} lotes restantes.")
+            log_callback("  ⚠️ Pulando lotes restantes.")
+            return True
+
+        if not resposta:
             break
 
-        if resposta:
-            resultados = _parsear_resposta_partnumber(resposta, len(batch_descs),
-                                                      log_callback)
-            for i, desc_key in enumerate(batch_descs):
-                if i < len(resultados):
-                    cache_resultados[desc_key] = resultados[i]
+        resultados = _parsear_resposta_sem_padding(resposta, len(pendentes),
+                                                    log_callback)
+        for i, desc_key in enumerate(pendentes[:len(resultados)]):
+            cache[desc_key] = resultados[i]
 
-        # Rate limiting leve (Gemini 2.0 Flash suporta alto throughput)
-        if batch_idx < total_batches - 1:
+        if len(resultados) < len(pendentes):
+            perdidos = pendentes[len(resultados):]
+            tentativa += 1
+            log_callback(f"  🔄 Truncamento: {len(resultados)}/{len(pendentes)} "
+                         f"recebidos. Re-enviando {len(perdidos)} "
+                         f"(tentativa {tentativa}/{max_retries})...")
+            pendentes = perdidos
             time.sleep(1)
+        else:
+            break
 
-    # ── Distribuir resultados para todas as linhas ────────────
+    return False
+
+
+def _distribuir_resultados(df: pd.DataFrame, desc_to_indices: dict,
+                            cache_resultados: dict) -> tuple[int, int]:
+    """Distribui resultados da IA para todas as linhas do DataFrame."""
+    resolvidos_pn = 0
+    resolvidos_desc = 0
+
     for desc_key, row_indices in desc_to_indices.items():
         resultado = cache_resultados.get(desc_key)
         if not resultado:
@@ -434,8 +509,7 @@ def _resolver_sin_codigo_via_ia(df: pd.DataFrame, mask_sin: pd.Series,
                 df.at[idx_row, "DESCRICAO"] = desc_ia
                 resolvidos_desc += 1
 
-    log_callback(f"  ✓ IA resolveu {resolvidos_pn:,} partnumbers e "
-                 f"{resolvidos_desc:,} descrições")
+    return resolvidos_pn, resolvidos_desc
 
 
 def _construir_prompt_partnumber(descricoes: list) -> str:
@@ -460,24 +534,40 @@ _FATAL_ERROR = "__FATAL__"
 
 def _enviar_com_retries(client, prompt: str, log_callback,
                         max_tentativas: int = 6) -> str | None:
-    """Envia prompt ao Gemini com retries em caso de erro.
-    Retorna _FATAL_ERROR se o erro for irrecuperável (ex: 403 PERMISSION_DENIED)."""
+    """Envia prompt ao Gemini com retries.
+    Após esgotar tentativas em erro 429, pergunta ao usuário se deseja
+    tentar mais 10 vezes ou prosseguir sem resultado.
+    Retorna _FATAL_ERROR se o erro for irrecuperável."""
+    resultado = _tentar_envio(client, prompt, log_callback, max_tentativas)
+    if resultado is not None:
+        return resultado
+
+    # Esgorou tentativas — perguntar ao usuário
+    if _perguntar_retry_usuario(log_callback):
+        log_callback("  🔄 Usuário optou por tentar novamente (mais 10 tentativas)...")
+        return _tentar_envio(client, prompt, log_callback, 10)
+
+    log_callback("  ⏩ Usuário optou por prosseguir sem este lote.")
+    return None
+
+
+def _tentar_envio(client, prompt: str, log_callback,
+                  max_tentativas: int) -> str | None:
+    """Executa até max_tentativas de envio ao Gemini."""
     for tentativa in range(max_tentativas):
         try:
             response = client.models.generate_content(
-                model="gemini-2.0-flash", contents=prompt,
-                config={"max_output_tokens": 8192})
+                model="gemini-2.0-flash", contents=prompt)
             return response.text.strip()
         except Exception as retry_err:
             err_str = str(retry_err)
-            # Erros fatais — não adianta tentar de novo
             if any(k in err_str for k in ("403", "PERMISSION_DENIED", "leaked",
                                            "401", "UNAUTHENTICATED", "invalid")):
                 log_callback(f"  ❌ Erro fatal de autenticação: {retry_err}")
                 log_callback("  ❌ Abortando consultas IA — verifique sua API Key.")
                 return _FATAL_ERROR
             if tentativa >= max_tentativas - 1:
-                log_callback(f"  ⚠️ Falha final: {retry_err}")
+                log_callback(f"  ⚠️ Falha após {max_tentativas} tentativas: {retry_err}")
                 return None
             wait = _calcular_wait(tentativa, retry_err)
             log_callback(f"  ⏳ Tentativa {tentativa+1}/{max_tentativas} falhou, "
@@ -486,41 +576,65 @@ def _enviar_com_retries(client, prompt: str, log_callback,
     return None
 
 
+def _perguntar_retry_usuario(log_callback) -> bool:
+    """Pergunta ao usuário se deseja tentar novamente via messagebox."""
+    from tkinter import messagebox
+    log_callback("  ⚠️ Todas as tentativas falharam (rate limit). "
+                 "Aguardando decisão do usuário...")
+    return messagebox.askretrycancel(
+        "Rate Limit Excedido (429)",
+        "A API do Gemini está com limite de requisições excedido.\n\n"
+        "Tentar novamente? (mais 10 tentativas com backoff)\n"
+        "Cancelar = prosseguir sem este lote."
+    )
+
+
 def _calcular_wait(tentativa: int, erro: Exception) -> int:
     """Calcula o tempo de espera entre retries."""
     if "429" in str(erro):
         return min((tentativa + 1) * 15, 90)
-    return (tentativa + 1) * 5
+    return min((tentativa + 1) * 5, 30)
 
 
-def _parsear_resposta_partnumber(resposta_texto: str, expected_count: int,
-                                  log_callback) -> list:
-    """Extrai lista de partnumbers/descrições do JSON retornado pela IA.
-    Aceita chaves compactas (p/d) ou completas (partnumber/descricao).
-    Recupera JSON truncado (quando IA atinge limite de tokens)."""
-    # Limpar markdown
-    resposta_texto = re.sub(r"```json\s*", "", resposta_texto)
-    resposta_texto = re.sub(r"```\s*", "", resposta_texto)
-    resposta_texto = resposta_texto.strip()
+def _parsear_resposta_sem_padding(resposta_texto: str, expected_count: int,
+                                   log_callback) -> list:
+    """Extrai itens do JSON da IA sem preencher faltantes com vazio."""
+    resposta_texto = _limpar_markdown(resposta_texto)
+    resultados = _tentar_parse_json(resposta_texto, log_callback)
 
-    resultados = None
-
-    # ── Tentativa 1: parse normal ──
-    try:
-        resultados = json.loads(resposta_texto)
-    except json.JSONDecodeError:
-        pass
-
-    # ── Tentativa 2: JSON truncado — recuperar itens válidos ──
     if resultados is None:
-        resultados = _recuperar_json_truncado(resposta_texto, log_callback)
-
-    if resultados is None or not isinstance(resultados, list):
         log_callback(f"  ⚠️ Resposta IA inválida (não é lista)")
         log_callback(f"     Resposta: {resposta_texto[:200]}...")
         return []
 
-    # Normalizar chaves compactas p→partnumber, d→descricao
+    normalizados = _normalizar_itens(resultados)
+
+    if len(normalizados) < expected_count:
+        log_callback(f"  ⚠️ Truncamento: {len(normalizados)}/{expected_count} "
+                     f"itens recuperados")
+    return normalizados
+
+
+def _limpar_markdown(texto: str) -> str:
+    """Remove delimitadores de bloco markdown da resposta."""
+    texto = re.sub(r"```json\s*", "", texto)
+    texto = re.sub(r"```\s*", "", texto)
+    return texto.strip()
+
+
+def _tentar_parse_json(texto: str, log_callback) -> list | None:
+    """Tenta parsear JSON; se truncado, recupera itens válidos."""
+    try:
+        resultado = json.loads(texto)
+        if isinstance(resultado, list):
+            return resultado
+    except json.JSONDecodeError:
+        pass
+    return _recuperar_json_truncado(texto, log_callback)
+
+
+def _normalizar_itens(resultados: list) -> list:
+    """Normaliza chaves compactas (p/d) para (partnumber/descricao)."""
     normalizados = []
     for item in resultados:
         if not isinstance(item, dict):
@@ -530,62 +644,30 @@ def _parsear_resposta_partnumber(resposta_texto: str, expected_count: int,
             "partnumber": item.get("partnumber") or item.get("p") or "",
             "descricao": item.get("descricao") or item.get("d") or "",
         })
-
-    # Se recebemos menos itens que o esperado, preencher o resto com vazio
-    if len(normalizados) < expected_count:
-        faltam = expected_count - len(normalizados)
-        log_callback(f"  ⚠️ JSON truncado: recuperados {len(normalizados)}/{expected_count} "
-                     f"itens ({faltam} perdidos)")
-        normalizados.extend([{"partnumber": "", "descricao": ""}] * faltam)
-
     return normalizados
 
 
 def _recuperar_json_truncado(texto: str, log_callback) -> list | None:
-    """Recupera o máximo de itens de um JSON array truncado."""
+    """Recupera itens válidos de um JSON array truncado."""
     inicio = texto.find("[")
     if inicio == -1:
         return None
 
     texto = texto[inicio:]
-
-    ultimo_fecha = texto.rfind("}")
-    if ultimo_fecha == -1:
-        return None
-
-    tentativa = texto[:ultimo_fecha + 1] + "]"
-    try:
-        resultado = json.loads(tentativa)
-        if isinstance(resultado, list):
-            log_callback(f"  🔧 JSON truncado recuperado: {len(resultado)} itens salvos")
-            return resultado
-    except json.JSONDecodeError:
-        pass
-
-    penultimo_fecha = texto.rfind("}", 0, ultimo_fecha)
-    if penultimo_fecha == -1:
-        return None
-
-    tentativa2 = texto[:penultimo_fecha + 1] + "]"
-    try:
-        resultado = json.loads(tentativa2)
-        if isinstance(resultado, list):
-            log_callback(f"  🔧 JSON truncado recuperado (modo 2): {len(resultado)} itens salvos")
-            return resultado
-    except json.JSONDecodeError:
-        pass
-
     posicoes = [i for i, c in enumerate(texto) if c == "}"]
-    for pos in reversed(posicoes[:-2]):
-        tentativa3 = texto[:pos + 1] + "]"
+    if not posicoes:
+        return None
+
+    for pos in reversed(posicoes):
+        tentativa = texto[:pos + 1] + "]"
         try:
-            resultado = json.loads(tentativa3)
+            resultado = json.loads(tentativa)
             if isinstance(resultado, list) and len(resultado) > 0:
-                log_callback(f"  🔧 JSON truncado recuperado (modo 3): {len(resultado)} itens salvos")
+                log_callback(f"  🔧 JSON truncado recuperado: "
+                             f"{len(resultado)} itens salvos")
                 return resultado
         except json.JSONDecodeError:
             continue
-
     return None
 
 
