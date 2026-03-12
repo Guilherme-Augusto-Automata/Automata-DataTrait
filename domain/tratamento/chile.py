@@ -321,6 +321,23 @@ def _extrair_partnumber_e_descricao(df: pd.DataFrame, api_key: str,
     pn_extraido = dnombre_raw.str.split("~").str[0].str.strip()
     pn_extraido = pn_extraido.replace({"nan": "", "None": "", "NaN": ""})
 
+    # Limpar PNs: separar prefixo descritivo de código real
+    pn_extraido = pn_extraido.apply(_limpar_pn_chile)
+
+    # Validar: rejeitar texto descritivo que não é partnumber real
+    mask_nao_sin = ~pn_extraido.str.upper().str.contains(
+        "SIN-CODIGO|SIN CODIGO|SINCODIGO", regex=True, na=False
+    )
+    mask_invalido = (pn_extraido != "") & mask_nao_sin & ~pn_extraido.apply(
+        lambda x: _validar_pn_chile(x) if x else True
+    )
+    invalidos_count = mask_invalido.sum()
+    if invalidos_count > 0:
+        amostras_inv = pn_extraido[mask_invalido].drop_duplicates().head(15).tolist()
+        log_callback(f"  🧹 {invalidos_count:,} PNs descartados (texto descritivo)")
+        log_callback(f"  📊 Amostras descartadas: {amostras_inv}")
+        pn_extraido = pn_extraido.where(~mask_invalido, other="")
+
     # Construir descrição base das colunas EF, EG, EH
     desc_parts = []
     for idx_col in [idx_ef, idx_eg, idx_eh]:
@@ -332,28 +349,302 @@ def _extrair_partnumber_e_descricao(df: pd.DataFrame, api_key: str,
 
     descricao_concat = (desc_parts[0] + " " + desc_parts[1] + " " + desc_parts[2]).str.strip()
 
-    # Identificar linhas com SIN-CODIGO
+    # Identificar linhas sem partnumber válido (SIN-CODIGO + descartados + vazios)
     mask_sin = pn_extraido.str.upper().str.contains("SIN-CODIGO|SIN CODIGO|SINCODIGO",
                                                       regex=True, na=False)
+    mask_sem_pn = mask_sin | (pn_extraido == "")
 
-    pn_ok = (~mask_sin & (pn_extraido != "")).sum()
+    pn_ok = (~mask_sem_pn).sum()
     sin_count = mask_sin.sum()
     log_callback(f"  ✓ {pn_ok:,} partnumbers extraídos diretamente")
-    log_callback(f"  ⚠️ {sin_count:,} linhas com SIN-CODIGO — serão consultadas via IA")
+    log_callback(f"  ⚠️ {mask_sem_pn.sum():,} linhas sem PN "
+                 f"(SIN-CODIGO: {sin_count:,}, descartados: {invalidos_count:,})")
 
     # Inicializar colunas
     df["PARTNUMBER"] = pn_extraido
     df["DESCRICAO"] = descricao_concat
 
-    # Para linhas SIN-CODIGO: consultar IA
-    if sin_count > 0 and api_key:
-        _resolver_sin_codigo_via_ia(df, mask_sin, descricao_concat, api_key, log_callback)
-    elif sin_count > 0 and not api_key:
-        log_callback("  ⚠️ Sem API Key Gemini. Linhas SIN-CODIGO ficarão sem partnumber.")
+    # ── ETAPA 1: extrair PNs com regex das colunas EF, EG, EH ──
+    if mask_sem_pn.sum() > 0:
+        _resolver_sin_codigo_via_regex(df, mask_sem_pn, desc_parts, log_callback)
 
+    # ── ETAPA 2: para os que ainda não têm PN, usar IA ──
+    mask_sin_restante = (
+        df["PARTNUMBER"].str.upper().str.contains(
+            "SIN-CODIGO|SIN CODIGO|SINCODIGO", regex=True, na=False)
+        | (mask_sem_pn & (df["PARTNUMBER"].astype(str).str.strip() == ""))
+    )
+    sin_restante = mask_sin_restante.sum()
+    if sin_restante > 0 and api_key:
+        log_callback(f"  ⚠️ {sin_restante:,} linhas SIN-CODIGO restantes → consultando IA")
+        _resolver_sin_codigo_via_ia(df, mask_sin_restante, descricao_concat,
+                                     api_key, log_callback)
+    elif sin_restante > 0 and not api_key:
+        log_callback(f"  ⚠️ {sin_restante:,} linhas SIN-CODIGO restantes. "
+                     "Sem API Key Gemini — ficarão sem partnumber.")
+
+    total_pn = (df["PARTNUMBER"].astype(str).str.strip() != "").sum()
+    total_sin_restante = df["PARTNUMBER"].str.upper().str.contains(
+        "SIN-CODIGO|SIN CODIGO|SINCODIGO", regex=True, na=False).sum()
+    # Limpar linhas que ainda ficaram com SIN-CODIGO → vazio
+    if total_sin_restante > 0:
+        mask_limpar = df["PARTNUMBER"].str.upper().str.contains(
+            "SIN-CODIGO|SIN CODIGO|SINCODIGO", regex=True, na=False)
+        df.loc[mask_limpar, "PARTNUMBER"] = ""
+        log_callback(f"  🧹 {total_sin_restante:,} linhas SIN-CODIGO limpas → vazio")
     total_pn = (df["PARTNUMBER"].astype(str).str.strip() != "").sum()
     log_callback(f"  ✓ Total final: {total_pn:,} partnumbers "
                  f"({time.perf_counter()-t0:.2f}s)")
+
+
+# ============================================================
+# RESOLUÇÃO VIA REGEX (colunas EF, EG, EH)
+# ============================================================
+
+# Regex para códigos alfanuméricos mistos (letras+números)
+_REGEX_PN_CHILE = re.compile(
+    r"(?:^|\s|[,;|])"
+    r"("
+    # Formato com traço: VMHPL24-30-SMO, 08CLA-P99-0F0A8
+    r"(?:[A-Za-z0-9]{2,10}[\-][A-Za-z0-9][\-A-Za-z0-9]{1,30})"
+    r"|"
+    # Alfanumérico misto (letras+números juntos), 5-20 chars
+    r"(?:(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{5,20})"
+    r"|"
+    # Números longos seguidos de letra(s): 61071101715S001A
+    r"(?:[0-9]{1,12}[A-Za-z][A-Za-z0-9]{0,30})"
+    r"|"
+    # Letras seguidas de números: AF9633MB
+    r"(?:[A-Za-z]{1,5}[0-9][A-Za-z0-9]{2,30})"
+    r"|"
+    # Formato com barras: AF6310/FH
+    r"(?:[A-Za-z0-9]{2,6}/[A-Za-z0-9/]{2,20})"
+    r"|"
+    # Formato com pontos numéricos: 510.730.001
+    r"(?:[0-9]{1,5}[.][0-9]{2,6}[.\-][0-9]{2,6}(?:\.[0-9]{1,4})?)"
+    r")"
+    r"(?=\s|$|[,;|])",
+    re.IGNORECASE
+)
+
+# Marcadores explícitos de PN
+_REGEX_MARCADORES_CHILE = re.compile(
+    r"(?:"
+    r"P/?N[.:]?\s*"
+    r"|"
+    r"PART\s*(?:NO|NUMBER|#)[.:#]?\s*"
+    r"|"
+    r"(?:PARTE\s*#|#\s*PARTE?)\s*[:#]?\s*"
+    r"|"
+    r"(?:NRO\.?\s*(?:AUTO)?PARTE|N[°º]\s*PARTE|PARTE\s*N[°º])\s*[:#]?\s*"
+    r"|"
+    r"C[OÓ]DIGO\s*[:#]?\s*"
+    r"|"
+    r"COD[.:]?\s*"
+    r")"
+    r"([A-Za-z0-9][A-Za-z0-9\-/. ]{2,40}?)"
+    r"(?=\s+[A-ZÁÉÍÓÚÑ]{4,}|\s*$|\s*[,;|])",
+    re.IGNORECASE
+)
+
+# Palavras que não são partnumbers
+_PALAVRAS_EXCLUIDAS_CHILE = {
+    "S/M", "SM", "S.M", "S/N", "SN", "S.N", "SIN MODELO", "SIN MARCA",
+    "SIN-CODIGO", "SINCODIGO",
+    "BULTO", "BULTOS", "LIQUIDO", "MOTOR", "PARA", "USO",
+    "AUTOMOTRIZ", "UNIDADES", "UNIDAD", "REPUESTO", "REPUESTOS",
+    "INDUSTRIAL", "COMERCIAL", "MATERIAL",
+    "SELLO", "SELLOS", "ANILLO", "ANILLOS", "EMPAQUE", "JUNTA", "JUNTAS",
+    "GASKET", "SEAL", "RING", "KIT", "SET",
+    "LITRO", "LITROS", "GALON", "GALONES", "CILINDRO", "TAMBOR",
+    "ACEITE", "LUBRICANTE", "FLUIDO", "ADITIVO",
+    "FILTRO", "FILTROS", "CORREA", "CORREAS", "MANGUERA", "MANGUERAS",
+    "BOMBA", "VALVULA", "VALVULAS",
+    "PESO", "NETO", "BRUTO", "TOTAL",
+    "VITON", "NITRILO", "EPDM", "ACERO", "METAL",
+    "ORIGINAL", "ORIGINALES", "GENUINO",
+    "COOLANT", "ANTIFREEZE", "PREMEZCLA",
+    "PREMIX", "PREMIXED", "RTU",
+    "GALLON", "GALLONS", "DRUM", "PAIL",
+    "ULGADAS", "PULGADAS",
+}
+
+
+def _limpar_pn_chile(pn: str) -> str:
+    """Limpa PN do Chile: separa prefixo descritivo de código alfanumérico.
+    Ex: 'COMPUERTA 115S-FS4/3-RP-NC' → '115S-FS4/3-RP-NC'
+    """
+    if not pn or pn in ("", "nan", "None", "NaN"):
+        return ""
+    pn = pn.strip()
+
+    # Se contém espaço, tentar separar prefixo descritivo do código real
+    if " " in pn:
+        partes = pn.split(None, 1)
+        if len(partes) == 2:
+            primeira, segunda = partes
+            p1_alfa = primeira.replace("-", "").replace(".", "").replace("_", "").isalpha()
+            p2_alfa = segunda.replace("-", "").replace(".", "").replace("_", "").isalpha()
+            p1_digit = bool(re.search(r'\d', primeira))
+            p2_digit = bool(re.search(r'\d', segunda))
+
+            # Primeira é all-alpha (descritiva) e segunda tem dígitos (código)
+            # Só retorna se o código extraído tiver 4+ chars (senão é curto demais)
+            if p1_alfa and p2_digit and len(segunda.strip()) >= 4:
+                return segunda.strip()
+
+            # Segunda é all-alpha (descritiva) e primeira tem dígitos (código)
+            if p2_alfa and p1_digit and len(primeira.strip()) >= 4:
+                return primeira.strip()
+
+    return pn
+
+
+def _validar_pn_chile(pn: str) -> bool:
+    """Valida se o candidato a PN é realmente um partnumber válido.
+    Usa regras lógicas (não hardcoded) para filtrar texto descritivo."""
+    if not pn or len(pn) < 3:
+        return False
+    pn_upper = pn.strip().upper()
+
+    if pn_upper in _PALAVRAS_EXCLUIDAS_CHILE:
+        return False
+
+    # ── Regra 1: texto puramente alfabético (inclui separadores comuns) ──
+    # Limpa hífens, barras, pontos, espaços e underscores antes de checar
+    pn_clean = re.sub(r'[\-/. _]', '', pn_upper)
+    if pn_clean.isalpha():
+        return False
+
+    # ── Regra 2: número(s) + espaço + palavra(s) alfabética(s) ──
+    # Ex: "2 PULGADAS", "40 CONEXION", "16 CONEXION"
+    if re.match(r'^\d+\s+[A-Za-z][A-Za-z\s]*$', pn_upper):
+        return False
+
+    # ── Regra 3: prefixo alfa curto (1-3 chars) + dígito + espaço + alfa ──
+    # Ex: "DE8 PULGADAS"
+    if re.match(r'^[A-Za-z]{1,3}\d+\s+[A-Za-z][A-Za-z\s]*$', pn_upper):
+        return False
+
+    # ── Regra 4: múltiplas palavras sem nenhum token misto (letra+dígito) ──
+    # Se tem espaço, cada token deve ser ou puro-alfa ou puro-numérico
+    # → não é código; é texto descritivo
+    if ' ' in pn_upper:
+        tokens = pn_upper.split()
+        tem_token_misto = any(
+            bool(re.search(r'[A-Za-z]', t)) and bool(re.search(r'\d', t))
+            for t in tokens
+        )
+        if not tem_token_misto:
+            return False
+
+    # ── Regra 5: strings com 4+ palavras são descrições ──
+    if len(pn_upper.split()) >= 4:
+        return False
+
+    # ── Regra 6: formatos de medida/embalagem ──
+    if re.match(r'^\d+\s*[xX]\s*\d+', pn_upper):
+        return False
+    if re.match(r'^\d+\s*(L|LT|GL|LTR|ML|MM|KG|GAL|GA|GLS|OZ|CC)S?$', pn_upper):
+        return False
+
+    # ── Regra 7: números muito curtos (menos de 4 dígitos sozinhos) ──
+    if pn_clean.isdigit() and len(pn_clean) < 4:
+        return False
+
+    # ── Regra 8: compostos só-alfa com hífens ──
+    partes_hifen = pn_upper.split('-')
+    if len(partes_hifen) >= 2 and all(p.strip().isalpha() for p in partes_hifen if p.strip()):
+        return False
+
+    # ── Regra 9: compostos só-alfa com underscore ──
+    partes_under = pn_upper.split('_')
+    if len(partes_under) >= 2 and all(p.strip().isalpha() for p in partes_under if p.strip()):
+        return False
+
+    return True
+
+
+def _extrair_pn_de_texto_chile(texto: str) -> str:
+    """Extrai partnumber de um texto chileno usando regex."""
+    if not texto or texto in ("nan", "None", "NaN", ""):
+        return ""
+
+    # Prioridade 1: Marcadores explícitos
+    m = _REGEX_MARCADORES_CHILE.search(texto)
+    if m:
+        pn = m.group(1).strip().rstrip(",. ")
+        if _validar_pn_chile(pn):
+            return pn
+
+    # Prioridade 2: Código alfanumérico misto
+    m = _REGEX_PN_CHILE.search(texto)
+    if m:
+        pn = m.group(1).strip().rstrip(",. ")
+        if _validar_pn_chile(pn):
+            return pn
+
+    return ""
+
+
+def _resolver_sin_codigo_via_regex(df: pd.DataFrame, mask_sin: pd.Series,
+                                    desc_parts: list, log_callback) -> None:
+    """Extrai partnumber via regex das colunas EF, EG, EH antes de recorrer à IA."""
+    log_callback("\n🔍 Extraindo PN via regex das colunas EF, EG, EH (SIN-CODIGO)...")
+    t0 = time.perf_counter()
+
+    indices_sin = df.index[mask_sin].tolist()
+    total_sin = len(indices_sin)
+    resolvidos = 0
+    fonte_stats: dict[str, int] = {}
+
+    for idx_row in indices_sin:
+        pn_encontrado = ""
+        fonte = ""
+
+        # Tentar cada coluna: EF → EG → EH
+        for i, letra in enumerate(["EF", "EG", "EH"]):
+            texto = str(desc_parts[i].iloc[idx_row]).strip()
+            if not texto or texto in ("nan", "None", "NaN", ""):
+                continue
+            pn = _extrair_pn_de_texto_chile(texto)
+            if pn:
+                pn_encontrado = pn
+                fonte = letra
+                break
+
+        # Se não encontrou em colunas individuais, tentar no texto concatenado
+        if not pn_encontrado:
+            texto_full = " ".join(
+                str(desc_parts[i].iloc[idx_row]).strip()
+                for i in range(3)
+            ).strip()
+            if texto_full:
+                pn = _extrair_pn_de_texto_chile(texto_full)
+                if pn:
+                    pn_encontrado = pn
+                    fonte = "CONCAT"
+
+        if pn_encontrado:
+            df.at[idx_row, "PARTNUMBER"] = pn_encontrado
+            resolvidos += 1
+            fonte_stats[fonte] = fonte_stats.get(fonte, 0) + 1
+
+    log_callback(f"  ✓ Regex resolveu {resolvidos:,} de {total_sin:,} "
+                 f"SIN-CODIGO ({resolvidos/max(total_sin,1)*100:.1f}%)")
+    for fonte_nome, qtd in sorted(fonte_stats.items(), key=lambda x: -x[1]):
+        log_callback(f"     Coluna {fonte_nome}: {qtd:,}")
+
+    restantes = total_sin - resolvidos
+    log_callback(f"  📊 Restantes sem PN (para IA): {restantes:,} "
+                 f"({time.perf_counter()-t0:.2f}s)")
+
+    # Amostras de PNs encontrados
+    mask_resolvido = mask_sin & ~df["PARTNUMBER"].str.upper().str.contains(
+        "SIN-CODIGO|SIN CODIGO|SINCODIGO", regex=True, na=False)
+    amostras = df.loc[mask_resolvido, "PARTNUMBER"].drop_duplicates().head(15).tolist()
+    if amostras:
+        log_callback(f"  📊 Amostras PN regex: {amostras}")
 
 
 def _resolver_sin_codigo_via_ia(df: pd.DataFrame, mask_sin: pd.Series,

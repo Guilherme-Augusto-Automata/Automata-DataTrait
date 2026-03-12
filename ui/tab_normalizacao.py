@@ -38,6 +38,7 @@ class TabNormalizacao:
         self.norm_processando = False
         self.norm_pn_conv_enabled = ctk.BooleanVar(value=False)
         self.norm_pn_conversions = []
+        self.norm_pn_conv_file = None
 
         self._build(tab_frame)
 
@@ -59,9 +60,9 @@ class TabNormalizacao:
         self._build_data_drop(left)
         self._build_separator(left)
         self._build_method_container(left)
+        self._build_template_button(left)
         self._build_separator(left)
         self._build_pn_conversion_section(left)
-        self._build_template_button(left)
         self._build_separator(left)
         self._build_format_selector(left)
         self._build_separator(left)
@@ -257,30 +258,39 @@ class TabNormalizacao:
         """Constrói frame de conversão PN (inicialmente oculto)."""
         self.norm_pn_conv_frame = ctk.CTkFrame(parent, fg_color="transparent")
 
+        # Sub-frame para modo Excel (drop de arquivo de conversões)
+        self.norm_pn_conv_excel_sub = ctk.CTkFrame(self.norm_pn_conv_frame, fg_color="transparent")
+        self._build_pn_conv_excel_content()
+
+        # Sub-frame para modo APP (entrada manual)
+        self.norm_pn_conv_app_sub = ctk.CTkFrame(self.norm_pn_conv_frame, fg_color="transparent")
         self._build_pn_conv_entries()
         self._build_pn_conv_add_button()
         self._build_pn_conv_list()
+
+        # Mostrar sub-frame correto baseado no método selecionado
+        self._update_pn_conv_view()
 
         self._norm_pn_conv_separator = ctk.CTkFrame(parent, fg_color=COLORS["border"], height=1)
         self._norm_pn_conv_separator.pack(fill="x", padx=16, pady=12)
 
     def _build_pn_conv_entries(self):
         """Constrói campos de entrada de PN original e novo."""
-        ctk.CTkLabel(self.norm_pn_conv_frame, text="PN ORIGINAL:",
+        ctk.CTkLabel(self.norm_pn_conv_app_sub, text="PN ORIGINAL:",
                      font=ctk.CTkFont(size=12), text_color=COLORS["text"]
                      ).pack(anchor="w", padx=16, pady=(0, 2))
         self.norm_pn_de_entry = ctk.CTkEntry(
-            self.norm_pn_conv_frame, placeholder_text="Ex: ABC123",
+            self.norm_pn_conv_app_sub, placeholder_text="Ex: ABC123",
             fg_color=COLORS["card"], border_color=COLORS["border"],
             text_color=COLORS["text"], font=ctk.CTkFont(size=12)
         )
         self.norm_pn_de_entry.pack(fill="x", padx=16, pady=(0, 8))
 
-        ctk.CTkLabel(self.norm_pn_conv_frame, text="PN NOVO:",
+        ctk.CTkLabel(self.norm_pn_conv_app_sub, text="PN NOVO:",
                      font=ctk.CTkFont(size=12), text_color=COLORS["text"]
                      ).pack(anchor="w", padx=16, pady=(0, 2))
         self.norm_pn_para_entry = ctk.CTkEntry(
-            self.norm_pn_conv_frame, placeholder_text="Ex: XYZ456",
+            self.norm_pn_conv_app_sub, placeholder_text="Ex: XYZ456",
             fg_color=COLORS["card"], border_color=COLORS["border"],
             text_color=COLORS["text"], font=ctk.CTkFont(size=12)
         )
@@ -289,7 +299,7 @@ class TabNormalizacao:
     def _build_pn_conv_add_button(self):
         """Constrói botão de adicionar conversão PN."""
         ctk.CTkButton(
-            self.norm_pn_conv_frame, text="+  Adicionar Conversão",
+            self.norm_pn_conv_app_sub, text="+  Adicionar Conversão",
             font=ctk.CTkFont(size=12), fg_color=COLORS["primary"],
             hover_color=COLORS["secondary"], corner_radius=6, height=32,
             command=self._add_pn_conversion
@@ -297,7 +307,7 @@ class TabNormalizacao:
 
     def _build_pn_conv_list(self):
         """Constrói lista visual de conversões PN."""
-        self.norm_pn_conv_list_frame = ctk.CTkFrame(self.norm_pn_conv_frame, fg_color=COLORS["card"],
+        self.norm_pn_conv_list_frame = ctk.CTkFrame(self.norm_pn_conv_app_sub, fg_color=COLORS["card"],
                                                      corner_radius=8, border_width=1,
                                                      border_color=COLORS["border"])
         self.norm_pn_conv_list_frame.pack(fill="x", padx=16, pady=(0, 4))
@@ -308,13 +318,17 @@ class TabNormalizacao:
         ).pack(padx=12, pady=8)
 
     def _build_template_button(self, parent):
-        """Constrói botão para baixar modelo base."""
-        ctk.CTkButton(
-            parent, text="📥  Baixar Modelo Base",
+        """Constrói botão para baixar modelo base (visível apenas no modo Excel)."""
+        self._template_container = ctk.CTkFrame(parent, fg_color="transparent")
+        self._template_container.pack(fill="x")
+
+        self.norm_template_btn = ctk.CTkButton(
+            self._template_container, text="📥  Baixar Modelo Base (MARCA / PARTNUMBER)",
             font=ctk.CTkFont(size=12), fg_color=COLORS["primary"],
             hover_color=COLORS["secondary"], corner_radius=6, height=32,
             command=self._download_normalizacao_template
-        ).pack(fill="x", padx=16, pady=(0, 4))
+        )
+        self.norm_template_btn.pack(fill="x", padx=16, pady=(8, 4))
 
     def _build_format_selector(self, parent):
         """Constrói seção de seleção de formato de saída."""
@@ -394,9 +408,12 @@ class TabNormalizacao:
         if self.norm_method.get() == "excel":
             self.norm_app_frame.pack_forget()
             self.norm_excel_frame.pack(fill="x")
+            self.norm_template_btn.pack(fill="x", padx=16, pady=(8, 4))
         else:
             self.norm_excel_frame.pack_forget()
             self.norm_app_frame.pack(fill="x")
+            self.norm_template_btn.pack_forget()
+        self._update_pn_conv_view()
 
     def _on_norm_data_drop(self, event):
         """Trata drop de arquivo de dados."""
@@ -508,6 +525,7 @@ class TabNormalizacao:
         """Mostra/oculta seção de conversão de PN."""
         if self.norm_pn_conv_enabled.get():
             self.norm_pn_conv_frame.pack(fill="x", before=self._norm_pn_conv_separator)
+            self._update_pn_conv_view()
         else:
             self.norm_pn_conv_frame.pack_forget()
 
@@ -557,6 +575,107 @@ class TabNormalizacao:
             fg_color=COLORS["error"], hover_color="#D32F2F",
             corner_radius=4, command=lambda i=idx: self._remove_pn_conversion(i)
         ).pack(side="right", padx=4)
+
+    # ============================================================
+    # CONVERSÃO PN — EXCEL
+    # ============================================================
+    def _build_pn_conv_excel_content(self):
+        """Constrói conteúdo do sub-frame Excel para conversão de PN."""
+        sub = self.norm_pn_conv_excel_sub
+
+        ctk.CTkLabel(sub, text="📁  ARQUIVO DE CONVERSÕES PN",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=COLORS["info"]).pack(anchor="w", padx=16, pady=(0, 4))
+        ctk.CTkLabel(sub, text="Excel com colunas PN ORIGINAL e PN NOVO",
+                     font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"]
+                     ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        self.norm_pn_conv_drop = ctk.CTkFrame(sub, fg_color=COLORS["card"],
+                                               corner_radius=10, height=70,
+                                               border_width=2, border_color=COLORS["border"])
+        self.norm_pn_conv_drop.pack(fill="x", padx=16, pady=(0, 4))
+        self.norm_pn_conv_drop.pack_propagate(False)
+
+        self.norm_pn_conv_drop_label = ctk.CTkLabel(
+            self.norm_pn_conv_drop, text="Arraste ou clique para selecionar",
+            font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"], justify="center"
+        )
+        self.norm_pn_conv_drop_label.pack(expand=True)
+
+        self.norm_pn_conv_drop.drop_target_register(DND_FILES)
+        self.norm_pn_conv_drop.dnd_bind("<<Drop>>", self._on_pn_conv_file_drop)
+        self.norm_pn_conv_drop_label.drop_target_register(DND_FILES)
+        self.norm_pn_conv_drop_label.dnd_bind("<<Drop>>", self._on_pn_conv_file_drop)
+        self.norm_pn_conv_drop.bind("<Button-1>", self._on_pn_conv_file_browse)
+        self.norm_pn_conv_drop_label.bind("<Button-1>", self._on_pn_conv_file_browse)
+
+        self.norm_pn_conv_file_label = ctk.CTkLabel(sub, text="",
+                                                     font=ctk.CTkFont(size=11),
+                                                     text_color=COLORS["success"], wraplength=250)
+        self.norm_pn_conv_file_label.pack(anchor="w", padx=16)
+
+        ctk.CTkButton(
+            sub, text="📥  Baixar Modelo Conversão PN",
+            font=ctk.CTkFont(size=12), fg_color=COLORS["primary"],
+            hover_color=COLORS["secondary"], corner_radius=6, height=32,
+            command=self._download_pn_conversion_template
+        ).pack(fill="x", padx=16, pady=(8, 4))
+
+    def _update_pn_conv_view(self):
+        """Alterna entre sub-frames Excel e APP na conversão de PN."""
+        if self.norm_method.get() == "excel":
+            self.norm_pn_conv_app_sub.pack_forget()
+            self.norm_pn_conv_excel_sub.pack(fill="x")
+        else:
+            self.norm_pn_conv_excel_sub.pack_forget()
+            self.norm_pn_conv_app_sub.pack(fill="x")
+
+    def _on_pn_conv_file_drop(self, event):
+        """Trata drop de arquivo de conversões PN."""
+        path = parse_drop_path(event)
+        self._set_pn_conv_file(path)
+
+    def _on_pn_conv_file_browse(self, _event=None):
+        """Abre diálogo para selecionar arquivo de conversões PN."""
+        path = browse_file()
+        if path:
+            self._set_pn_conv_file(path)
+
+    def _set_pn_conv_file(self, path):
+        """Valida e define o arquivo de conversões PN."""
+        if not validate_file_path(path):
+            messagebox.showwarning("Arquivo inválido", "Selecione um arquivo .xlsx, .xls ou .csv")
+            return
+        self.norm_pn_conv_file = path
+        nome = os.path.basename(path)
+        self.norm_pn_conv_file_label.configure(text=f"✓ {nome}")
+        self.norm_pn_conv_drop_label.configure(text=f"📄 {nome}")
+        self.norm_pn_conv_drop.configure(border_color=COLORS["success"])
+        self._log(f"🔄 Arquivo de conversões PN: {nome}")
+
+    def _download_pn_conversion_template(self):
+        """Salva modelo Excel para conversão de partnumber."""
+        path = filedialog.asksaveasfilename(
+            title="Salvar Modelo Conversão PN",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile="modelo_conversao_pn.xlsx"
+        )
+        if not path:
+            return
+        try:
+            template_df = pd.DataFrame({
+                "PN ORIGINAL": ["ABC123", "XYZ789"],
+                "PN NOVO": ["DEF456", "UVW012"]
+            })
+            template_df.to_excel(path, index=False, engine="openpyxl")
+            self._log(f"📥 Modelo conversão PN salvo: {path}")
+            messagebox.showinfo("Modelo Salvo",
+                                f"Modelo de conversão salvo em:\n{path}\n\n"
+                                f"• PN ORIGINAL: partnumber atual no arquivo\n"
+                                f"• PN NOVO: partnumber que substituirá o original")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao salvar modelo:\n{e}")
 
     # ============================================================
     # TEMPLATE
@@ -690,9 +809,46 @@ class TabNormalizacao:
 
     def _coletar_conversoes_pn(self) -> list:
         """Retorna lista de conversões de PN se habilitadas."""
-        if self.norm_pn_conv_enabled.get() and self.norm_pn_conversions:
-            return list(self.norm_pn_conversions)
-        return []
+        if not self.norm_pn_conv_enabled.get():
+            return []
+        if self.norm_method.get() == "app":
+            return list(self.norm_pn_conversions) if self.norm_pn_conversions else []
+        # Modo Excel: carregar conversões do arquivo
+        if not self.norm_pn_conv_file or not os.path.exists(self.norm_pn_conv_file):
+            return []
+        return self._carregar_conversoes_pn_excel()
+
+    def _carregar_conversoes_pn_excel(self) -> list:
+        """Carrega conversões de PN do arquivo Excel."""
+        try:
+            df_conv = ler_arquivo(self.norm_pn_conv_file, dtype=str)
+            col_de, col_para = self._encontrar_colunas_conv(df_conv)
+            if not col_de or not col_para:
+                messagebox.showwarning("Atenção",
+                    "Colunas 'PN ORIGINAL' e 'PN NOVO' não encontradas\n"
+                    "no arquivo de conversões de PN.")
+                return []
+            conversoes = []
+            for _, row in df_conv.iterrows():
+                pn_de = str(row.get(col_de, "")).strip().upper()
+                pn_para = str(row.get(col_para, "")).strip().upper()
+                if pn_de and pn_de != "NAN" and pn_para and pn_para != "NAN":
+                    conversoes.append({"de": pn_de, "para": pn_para})
+            return conversoes
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao ler arquivo de conversões:\n{e}")
+            return []
+
+    def _encontrar_colunas_conv(self, df) -> tuple:
+        """Encontra colunas PN ORIGINAL e PN NOVO no DataFrame."""
+        col_de = col_para = None
+        for c in df.columns:
+            upper = c.upper().strip()
+            if upper in ("PN ORIGINAL", "PN_ORIGINAL", "PNORIGINAL"):
+                col_de = c
+            elif upper in ("PN NOVO", "PN_NOVO", "PNNOVO"):
+                col_para = c
+        return col_de, col_para
 
     def _despachar_normalizacao(self, regras, pn_conversions):
         """Inicia thread de normalização."""

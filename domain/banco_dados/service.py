@@ -24,11 +24,23 @@ def processar_banco_dados(input_path: str, output_dir: str, formato: str,
     """Orquestra a preparação do arquivo para o banco de dados."""
     try:
         df = _carregar_arquivo(input_path, log_callback)
+        log_callback(f"  📊 [RASTREIO] Após carregar: {len(df):,} linhas")
+
         resultado = _mapear_colunas(df, log_callback)
+        log_callback(f"  📊 [RASTREIO] Após mapear colunas: {len(resultado):,} linhas")
+
         _padronizar_datas(resultado, log_callback)
+        log_callback(f"  📊 [RASTREIO] Após padronizar datas: {len(resultado):,} linhas")
+
         _adicionar_colunas_vazias(resultado, log_callback)
+        log_callback(f"  📊 [RASTREIO] Após colunas vazias: {len(resultado):,} linhas")
+
         _adicionar_colunas_repetidas(resultado, log_callback)
+        log_callback(f"  📊 [RASTREIO] Após colunas repetidas: {len(resultado):,} linhas")
+
         resultado = _reordenar_colunas(resultado, log_callback)
+        log_callback(f"  📊 [RASTREIO] Após reordenar: {len(resultado):,} linhas")
+
         _log_resumo(resultado, df, log_callback)
 
         base_name = os.path.splitext(os.path.basename(input_path))[0] + "_banco"
@@ -198,8 +210,22 @@ def _reordenar_colunas(resultado: pd.DataFrame,
 def _log_resumo(resultado: pd.DataFrame, df_original: pd.DataFrame,
                 log_callback) -> None:
     """Loga resumo do resultado final."""
-    log_callback(f"  Total de linhas: {len(resultado):,}")
+    diff = len(df_original) - len(resultado)
+    log_callback(f"\n📊 Resumo final:")
+    log_callback(f"  Linhas originais:  {len(df_original):,}")
+    log_callback(f"  Linhas resultado:  {len(resultado):,}")
+    if diff != 0:
+        log_callback(f"  ⚠️ DIFERENÇA: {diff:,} linhas {'perdidas' if diff > 0 else 'adicionadas'}")
+    else:
+        log_callback(f"  ✓ Nenhuma linha perdida")
     log_callback(f"  Total de colunas: {len(resultado.columns)}")
+
+    # Verificar colunas com muitos vazios
+    for col in resultado.columns:
+        vazio = (resultado[col].fillna("").astype(str).str.strip() == "").sum()
+        if vazio > 0:
+            pct = vazio / len(resultado) * 100
+            log_callback(f"  📊 {col}: {vazio:,} vazios ({pct:.1f}%)")
 
 
 # ============================================================

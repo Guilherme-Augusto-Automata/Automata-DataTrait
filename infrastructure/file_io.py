@@ -66,6 +66,8 @@ def exportar_resultado(df: pd.DataFrame, output_dir: str, base_name: str,
 def exportar_banco(df: pd.DataFrame, output_dir: str, base_name: str,
                    formato: str, log_callback) -> None:
     """Despacha exportação de banco nos formatos selecionados."""
+    log_callback(f"  📊 [EXPORT] DataFrame com {len(df):,} linhas × "
+                 f"{len(df.columns)} colunas para exportação")
     if formato in ("xlsx", "ambos"):
         path = _caminho_saida(output_dir, base_name, ".xlsx")
         _salvar_xlsx_simples(df, path, log_callback)
