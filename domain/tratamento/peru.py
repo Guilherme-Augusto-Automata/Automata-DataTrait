@@ -435,8 +435,8 @@ _REGEX_MARCADORES = re.compile(
     # PARTE # / #PARTE: / #PART
     r"(?:PARTE\s*#|#\s*PARTE?)\s*[:#]?\s*"
     r"|"
-    # NRO. AUTOPARTE: / NRO PARTE: / N° PARTE:
-    r"(?:NRO\.?\s*(?:AUTO)?PARTE|N[°º]\s*PARTE)\s*[:#]?\s*"
+    # NRO. AUTOPARTE: / NRO PARTE: / N° PARTE: / PARTE Nº: / PARTE N°:
+    r"(?:NRO\.?\s*(?:AUTO)?PARTE|N[°º]\s*PARTE|PARTE\s*N[°º])\s*[:#]?\s*"
     r"|"
     # CODIGO SEGUN FACTURA / CODIGO: / CÓDIGO: / COD: / COD.
     r"C[OÓ]DIGO\s*(?:SEG[UÚ]N\s+FACTURA)?\s*[:#]?\s*"
@@ -459,8 +459,8 @@ _REGEX_CODIGO_FINAL = re.compile(
     # Opção A: começa com letra(s) seguida de números  (ex: AF9633MB, BG00814782)
     r"(?:[A-Za-z]{1,5}[0-9][A-Za-z0-9\-/\.]{2,30})"
     r"|"
-    # Opção B: começa com números seguidos de letra(s)  (ex: 76367251BR, 9W6688)
-    r"(?:[0-9]{1,5}[A-Za-z][A-Za-z0-9\-/\.]{1,30})"
+    # Opção B: começa com números seguidos de letra(s)  (ex: 76367251BR, 9W6688, 61071101715S001A)
+    r"(?:[0-9]{1,12}[A-Za-z][A-Za-z0-9\-/\.]{1,30})"
     r"|"
     # Opção C: formato NUM-NUM ou NUM-ALFANUM  (ex: 07000-F2130, 413-10484-511-0)
     r"(?:[0-9]{2,6}[\-][A-Za-z0-9\-/]{3,30})"
@@ -486,8 +486,8 @@ _REGEX_CODIGO_MISTO = re.compile(
     # Mix alfanumérico com traço (ex: 08CLA-P99-0F0A8, AS3209-220, 11394-K2K-D01)
     r"(?:[A-Za-z0-9]{2,6}[\-][A-Za-z0-9][\-A-Za-z0-9]{2,25})"
     r"|"
-    # Letras+números juntos mín 5 chars (ex: AF9633MB, MZ341017EX, BG00814782)
-    r"(?:(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{5,15})"
+    # Letras+números juntos mín 5 chars (ex: AF9633MB, MZ341017EX, BG00814782, 61071101715S001A)
+    r"(?:(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{5,20})"
     r"|"
     # Formato com barras alfanuméricas (ex: AF6310/FH, AFC11100/1F, VC/13/G/)
     r"(?:[A-Za-z]{2,5}/[A-Za-z0-9/]{2,20})"
